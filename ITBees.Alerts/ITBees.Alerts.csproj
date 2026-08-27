@@ -1,10 +1,26 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
-  </PropertyGroup>
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>disable</Nullable>
+        <PackageId>ITBees.Alerts</PackageId>
+        <Version>8.0.1</Version>
+        <Authors>ITBeesPL</Authors>
+        <Description>Reusable alerting for ITBees applications: catalog, per-scope routing rules, deduplication, delivery outbox and e-mail, SMS and in-app channels.</Description>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="ITBees.Interfaces" Version="8.0.72" />
+        <PackageReference Include="ITBees.Mailing" Version="8.0.103" />
+        <PackageReference Include="ITBees.Models" Version="8.0.95" />
+        <PackageReference Include="ITBees.Notifications" Version="8.0.1" />
+        <PackageReference Include="ITBees.RestfulApiControllers" Version="8.0.31" />
+        <PackageReference Include="ITBees.SerwerSmsIntegration" Version="8.0.15" />
+        <PackageReference Include="ITBees.UserManager" Version="8.0.397" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.10" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.4" />
+    </ItemGroup>
 
 </Project>
