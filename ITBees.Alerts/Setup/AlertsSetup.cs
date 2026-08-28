@@ -15,8 +15,8 @@ namespace ITBees.Alerts.Setup;
 /// <para>
 /// The host still has to supply three adapters, because only it knows its own domain:
 /// <see cref="IAlertScopeAuthorization"/>, <see cref="IAlertScopeNameResolver"/>,
-/// <see cref="IAlertInAppAudienceResolver"/>, <see cref="IAlertContactBookResolver"/>,
-/// <see cref="IAlertCurrentUserAccessor"/> and <see cref="Abstractions.IAlertContext"/>,
+/// <see cref="IAlertInAppAudienceResolver"/>, <see cref="IAlertContactBookResolver"/>
+/// and <see cref="Abstractions.IAlertContext"/>,
 /// plus at least one <see cref="IAlertCatalogSource"/>
 /// with its alert kinds.
 /// </para>
@@ -42,10 +42,6 @@ public class AlertsSetup
         services.AddScoped<IAlertContactsService, AlertContactsService>();
         services.AddScoped<IAlertHistoryService, AlertHistoryService>();
         services.AddScoped<IAlertTestService, AlertTestService>();
-        services.AddScoped<INotificationContextService, NotificationContextService>();
-        services.AddScoped<IMyNotificationsService, MyNotificationsService>();
-        services.AddScoped<INotificationCounterService, NotificationCounterService>();
-        services.AddScoped<IDeleteAllMyNotificationsService, DeleteAllMyNotificationsService>();
     }
 
     public static void Register(IServiceCollection services, AlertChannelsConfiguration channels)

@@ -6,10 +6,8 @@ namespace ITBees.Alerts.Channels.InApp.Setup;
 public static class InAppAlertChannelSetup
 {
     /// <summary>
-    /// Adds the bell channel. The host must also register ITBees.Notifications itself
-    /// (<c>NotificationsSetup</c> plus its controllers and <c>DbModelBuilder</c>) - that is what
-    /// serves the bell to the frontend - and an <see cref="IAlertInAppAudienceResolver"/>
-    /// saying who may see a given scope.
+    /// Registers Alerts as a producer for ITBees.Notifications. The host must register
+    /// NotificationsSetup and IAlertInAppAudienceResolver.
     /// </summary>
     public static void Register(IServiceCollection services)
     {

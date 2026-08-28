@@ -10,7 +10,7 @@ namespace ITBees.Alerts.Abstractions;
 public enum AlertChannels
 {
     None = 0,
-    /// <summary>The bell in the top bar (ITBees.Notifications). Goes to logged-in users of the scope, not to contacts.</summary>
+    /// <summary>An in-application channel supplied by the host.</summary>
     InApp = 1,
     Email = 2,
     Sms = 4

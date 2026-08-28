@@ -40,8 +40,5 @@ public sealed class AlertSmsChannelConfiguration
     public Func<IServiceProvider, bool> OnlyToConsoleFactory { get; init; }
 }
 
-/// <summary>
-/// Marker enabling the ITBees.Notifications channel. Its repositories and audience resolver
-/// are domain services and therefore remain registered by the host.
-/// </summary>
+/// <summary>Enables delivery through the independently registered ITBees.Notifications library.</summary>
 public sealed class AlertInAppChannelConfiguration;

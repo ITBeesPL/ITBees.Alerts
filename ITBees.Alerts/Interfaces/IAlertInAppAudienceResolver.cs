@@ -3,9 +3,8 @@ using ITBees.Alerts.Abstractions;
 namespace ITBees.Alerts.Interfaces;
 
 /// <summary>
-/// Turns a scope into the people who should see the bell light up. The host application
-/// decides what "has access" means — employees of the parking's company, platform operators,
-/// and so on. Returning an empty set simply means nobody is notified in-app.
+/// Resolves the users who should receive an in-application alert for a scope.
+/// The host application owns this domain decision; the notification library remains generic.
 /// </summary>
 public interface IAlertInAppAudienceResolver
 {

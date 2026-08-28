@@ -1,5 +1,4 @@
 using ITBees.Alerts.DbModels;
-using ITBees.Notifications.DbModels;
 using Microsoft.EntityFrameworkCore;
 
 namespace ITBees.Alerts.Setup;
@@ -74,14 +73,5 @@ public class DbModelBuilder
             .HasForeignKey(x => x.AlertOccurrenceGuid)
             .OnDelete(DeleteBehavior.Cascade);
 
-        modelBuilder.Entity<Notification>()
-            .HasDiscriminator<string>("NotificationType")
-            .HasValue<Notification>("notification")
-            .HasValue<DiscriminatedNotification>("discriminated");
-        modelBuilder.Entity<DiscriminatedNotification>().Property(x => x.Discriminator)
-            .HasMaxLength(128).IsRequired();
-        modelBuilder.Entity<DiscriminatedNotification>().Property(x => x.ScopeKind).HasMaxLength(64);
-        modelBuilder.Entity<DiscriminatedNotification>()
-            .HasIndex(x => new { x.Discriminator, x.ScopeKind, x.ScopeId });
     }
 }

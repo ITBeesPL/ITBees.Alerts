@@ -12,12 +12,12 @@
 
     <ItemGroup>
         <PackageReference Include="ITBees.Interfaces" Version="8.0.72" />
-        <PackageReference Include="ITBees.Mailing" Version="8.0.103" />
+        <PackageReference Include="ITBees.Mailing" Version="8.0.104" />
         <PackageReference Include="ITBees.Models" Version="8.0.95" />
-        <PackageReference Include="ITBees.Notifications" Version="8.0.1" />
+        <PackageReference Include="ITBees.Notifications" Version="8.0.18" />
         <PackageReference Include="ITBees.RestfulApiControllers" Version="8.0.31" />
         <PackageReference Include="ITBees.SerwerSmsIntegration" Version="8.0.15" />
-        <PackageReference Include="ITBees.UserManager" Version="8.0.397" />
+        <PackageReference Include="ITBees.UserManager" Version="8.0.401" />
         <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.10" />
         <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
         <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.4" />
