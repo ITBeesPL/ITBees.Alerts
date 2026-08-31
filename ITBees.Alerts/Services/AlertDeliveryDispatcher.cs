@@ -54,7 +54,7 @@ public class AlertDeliveryDispatcher : BackgroundService
     {
         using var scope = _serviceProvider.CreateScope();
         var sp = scope.ServiceProvider;
-        var senders = sp.GetServices<IAlertChannelSender>().ToDictionary(x => x.Channel);
+        var senders = ResolveSenders(sp);
         var deliveryRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertDelivery>>();
         var contactRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertContact>>();
         var now = DateTime.UtcNow;
@@ -93,10 +93,19 @@ public class AlertDeliveryDispatcher : BackgroundService
                 .ToList();
 
         var digestDeliveryGuids = digestDeliveries.Select(x => x.Guid).ToHashSet();
+        var unroutable = new HashSet<AlertChannels>();
         foreach (var group in digestDeliveries.GroupBy(x => new { x.Discriminator, x.AlertContactGuid, x.Target }))
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
+
+            if (!senders.ContainsKey(AlertChannels.Sms))
+            {
+                if (unroutable.Add(AlertChannels.Sms))
+                    _logger.LogWarning("No sender registered for channel {Channel}; digests stay pending",
+                        AlertChannels.Sms);
+                continue;
+            }
 
             var claimGuid = Guid.NewGuid();
             var deliveries = await ClaimAsync(deliveryRoRepo, group.Select(x => x.Guid).ToList(),
@@ -117,6 +126,18 @@ public class AlertDeliveryDispatcher : BackgroundService
             if (cancellationToken.IsCancellationRequested)
                 return;
 
+            // Leave the row Pending when its channel is not wired up. Failed is terminal, so
+            // burning it here would make every alert raised before the channel was registered
+            // unrecoverable - a missing sender is a configuration gap, not a delivery failure.
+            if (!senders.ContainsKey(delivery.Channel))
+            {
+                if (unroutable.Add(delivery.Channel))
+                    _logger.LogWarning(
+                        "No sender registered for channel {Channel}; {Count} delivery(ies) stay pending",
+                        delivery.Channel, pending.Count(x => x.Channel == delivery.Channel));
+                continue;
+            }
+
             var claimGuid = Guid.NewGuid();
             var claimed = await ClaimAsync(deliveryRoRepo, [delivery.Guid], claimGuid, cancellationToken);
             if (claimed.Count == 0)
@@ -130,7 +151,23 @@ public class AlertDeliveryDispatcher : BackgroundService
         }
     }
 
-    private static async Task<AlertDeliveryResult> SendAsync(
+    /// <summary>
+    /// One sender per channel. A host that wires a channel twice must not take the whole
+    /// dispatcher down - ToDictionary would throw here, the cycle would be swallowed by the
+    /// caller's catch, and every channel would stop delivering.
+    /// </summary>
+    private IReadOnlyDictionary<AlertChannels, IAlertChannelSender> ResolveSenders(IServiceProvider sp)
+    {
+        var senders = new Dictionary<AlertChannels, IAlertChannelSender>();
+        foreach (var sender in sp.GetServices<IAlertChannelSender>())
+            if (!senders.TryAdd(sender.Channel, sender))
+                _logger.LogWarning("Duplicate alert channel sender registered for {Channel}; {Type} ignored",
+                    sender.Channel, sender.GetType().Name);
+
+        return senders;
+    }
+
+    private async Task<AlertDeliveryResult> SendAsync(
         IReadOnlyDictionary<AlertChannels, IAlertChannelSender> senders, AlertChannels channel,
         AlertDeliveryContext context, CancellationToken cancellationToken)
     {
@@ -144,7 +181,10 @@ public class AlertDeliveryDispatcher : BackgroundService
         }
         catch (Exception e)
         {
-            return AlertDeliveryResult.Fail(e.Message);
+            // The message is persisted and served to every scope reader, so it must not carry
+            // provider internals (host names, ports, credential diagnostics).
+            _logger.LogWarning(e, "Alert channel {Channel} threw while sending", channel);
+            return AlertDeliveryResult.Fail($"Channel failed ({e.GetType().Name}); check application logs");
         }
     }
 
