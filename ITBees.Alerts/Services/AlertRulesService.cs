@@ -68,10 +68,38 @@ public class AlertRulesService : IAlertRulesService
 
         LoadTargetsAndRecipients(rules);
 
+        // A rule with no targets covers every object of the kind, so it genuinely fires for this
+        // object and belongs on its screen - previously it was filtered out, and the operator saw
+        // "no alerting configured" while the alerts kept arriving. IsPlatformRule on the view
+        // model marks it as one the operator may read but not edit.
         if (scopeId != null)
-            rules = rules.Where(x => x.Targets.Any(target => target.ScopeId == scopeId.Value)).ToList();
+            rules = rules.Where(x => AlertRuleCoverage.Covers(x, scopeId)).ToList();
 
-        return rules.Select(x => new AlertRuleVm(x)).ToList();
+        var visibleBooks = _bookResolver.ResolveVisibleBooks(scope);
+        return rules.Select(x => BuildScopedVm(x, scopeId, visibleBooks)).ToList();
+    }
+
+    /// <summary>
+    /// One rule may span objects belonging to several owners. The caller asked about one scope,
+    /// so it must not learn which other objects the rule covers, and it must never see contact
+    /// details filed under an address book it cannot reach - <see cref="IAlertContactsService"/>
+    /// gates exactly the same data through the same resolver.
+    /// </summary>
+    private static AlertRuleVm BuildScopedVm(AlertRule rule, Guid? scopeId,
+        IReadOnlyList<AlertContactBook> visibleBooks)
+    {
+        var vm = new AlertRuleVm(rule);
+
+        if (scopeId != null)
+            vm.ScopeIds = vm.ScopeIds.Where(x => x == scopeId.Value).ToList();
+
+        vm.Recipients = (rule.Recipients ?? new List<AlertRuleRecipient>())
+            .Where(x => x.AlertContact != null && visibleBooks.Any(book =>
+                book.Kind == x.AlertContact.OwnerKind && book.Id == x.AlertContact.OwnerId))
+            .Select(x => new AlertRuleRecipientVm(x))
+            .ToList();
+
+        return vm;
     }
 
     private void LoadTargetsAndRecipients(List<AlertRule> rules)
@@ -99,8 +127,9 @@ public class AlertRulesService : IAlertRulesService
         EnsureScopeAllowed(kind);
         var definition = RequireDefinition(alertRuleIm.AlertKey, new AlertScope(kind));
         AuthorizeWrite(kind, targets);
-        ValidateCondition(definition, alertRuleIm.ComparisonOperator, alertRuleIm.ComparisonValue);
-        ValidateRecipients(discriminator, kind, targets, alertRuleIm.Recipients);
+        ValidateCondition(definition, alertRuleIm.ComparisonOperator, alertRuleIm.ComparisonValue,
+            alertRuleIm.MinSeverity);
+        var assignableContacts = ValidateRecipients(discriminator, kind, targets, alertRuleIm.Recipients);
 
         // Several rules may share one alert kind - "CPU > 90%" on two parkings and "> 70%" on a
         // third is a legitimate setup, and duplicate deliveries are collapsed at send time.
@@ -124,7 +153,7 @@ public class AlertRulesService : IAlertRulesService
         });
 
         ReplaceTargets(rule.Guid, targets);
-        ReplaceRecipients(rule.Guid, discriminator, kind, targets, alertRuleIm.Recipients);
+        ReplaceRecipients(rule.Guid, discriminator, kind, targets, alertRuleIm.Recipients, assignableContacts);
         return BuildVm(rule);
     }
 
@@ -146,8 +175,10 @@ public class AlertRulesService : IAlertRulesService
         AuthorizeWrite(rule.ScopeKind, targets);
         var alertKey = string.IsNullOrWhiteSpace(alertRuleUm.AlertKey) ? rule.AlertKey : alertRuleUm.AlertKey;
         var definition = RequireDefinition(alertKey, new AlertScope(rule.ScopeKind));
-        ValidateCondition(definition, alertRuleUm.ComparisonOperator, alertRuleUm.ComparisonValue);
-        ValidateRecipients(discriminator, rule.ScopeKind, targets, alertRuleUm.Recipients);
+        ValidateCondition(definition, alertRuleUm.ComparisonOperator, alertRuleUm.ComparisonValue,
+            alertRuleUm.MinSeverity);
+        var assignableContacts = ValidateRecipients(discriminator, rule.ScopeKind, targets,
+            alertRuleUm.Recipients);
 
         // Build the response from the write repository result - the read repository context still
         // tracks the pre-update instance, so re-reading it there would hand back the old values.
@@ -166,7 +197,8 @@ public class AlertRulesService : IAlertRulesService
         }).First();
 
         ReplaceTargets(rule.Guid, targets);
-        ReplaceRecipients(rule.Guid, discriminator, rule.ScopeKind, targets, alertRuleUm.Recipients);
+        ReplaceRecipients(rule.Guid, discriminator, rule.ScopeKind, targets, alertRuleUm.Recipients,
+            assignableContacts);
         return BuildVm(updatedRule);
     }
 
@@ -193,7 +225,7 @@ public class AlertRulesService : IAlertRulesService
     // ---- internals ----
 
     private static void ValidateCondition(AlertDefinition definition, AlertComparisonOperator comparisonOperator,
-        double? comparisonValue)
+        double? comparisonValue, AlertSeverity minSeverity)
     {
         var numeric = !string.IsNullOrWhiteSpace(definition.MetricKey);
         if (!numeric)
@@ -206,6 +238,14 @@ public class AlertRulesService : IAlertRulesService
         if (comparisonOperator == AlertComparisonOperator.None || comparisonValue == null ||
             double.IsNaN(comparisonValue.Value) || double.IsInfinity(comparisonValue.Value))
             throw new FasApiErrorException("A comparison operator and numeric value are required", 400);
+
+        // Threshold alerts are always published at the catalog's default severity, so a rule
+        // demanding more would be accepted and then never fire - silently, because the evaluator
+        // remembers the condition as handled.
+        if (minSeverity > definition.DefaultSeverity)
+            throw new FasApiErrorException(
+                $"This alert is raised as {definition.DefaultSeverity}, so a rule requiring " +
+                $"{minSeverity} would never fire", 400);
     }
 
     private static string NormalizeDescription(string description) =>
@@ -250,53 +290,81 @@ public class AlertRulesService : IAlertRulesService
             _authorization.CheckWrite(new AlertScope(scopeKind, target));
     }
 
+    /// <summary>
+    /// Applied as a difference, never as delete-then-insert. The repository commits each call on
+    /// its own, and a rule with no targets covers EVERY object of its kind - so a rule emptied
+    /// even for the moment between two commits would fan an alert raised right then out to the
+    /// whole platform, and a failed insert would leave it that way permanently.
+    /// </summary>
     private void ReplaceTargets(Guid ruleGuid, List<Guid> targets)
     {
-        _targetWoRepo.DeleteData(x => x.AlertRuleGuid == ruleGuid);
-        if (targets.Count == 0)
-            return;
+        var existing = _targetRoRepo.GetData(x => x.AlertRuleGuid == ruleGuid).ToList();
+        var existingScopeIds = existing.Select(x => x.ScopeId).ToHashSet();
 
-        _targetWoRepo.InsertData(targets
+        var added = targets.Where(x => !existingScopeIds.Contains(x))
             .Select(x => new AlertRuleTarget { Guid = Guid.NewGuid(), AlertRuleGuid = ruleGuid, ScopeId = x })
-            .ToList());
+            .ToList();
+        if (added.Count > 0)
+            _targetWoRepo.InsertData(added);
+
+        var removed = existing.Where(x => !targets.Contains(x.ScopeId)).Select(x => x.Guid).ToList();
+        if (removed.Count > 0)
+            _targetWoRepo.DeleteData(x => removed.Contains(x.Guid));
     }
 
+    /// <summary>Applied as a difference too, so a save never blanks the recipient list in between.</summary>
     private void ReplaceRecipients(Guid ruleGuid, string discriminator, string scopeKind, List<Guid> targets,
-        List<AlertRuleRecipientIm> recipients)
+        List<AlertRuleRecipientIm> recipients, HashSet<Guid> validContactGuids = null)
     {
-        if (recipients == null || recipients.Count == 0)
+        var desired = new Dictionary<Guid, AlertChannels>();
+        if (recipients is { Count: > 0 })
         {
-            _recipientWoRepo.DeleteData(x => x.AlertRuleGuid == ruleGuid);
-            return;
+            validContactGuids ??= ResolveAssignableContactGuids(discriminator, scopeKind, targets, recipients);
+            foreach (var group in recipients
+                         .Where(x => validContactGuids.Contains(x.AlertContactGuid))
+                         .GroupBy(x => x.AlertContactGuid))
+                desired[group.Key] = group.First().Channels;
         }
 
-        var validContactGuids = ResolveAssignableContactGuids(discriminator, scopeKind, targets, recipients);
+        var existing = _recipientRoRepo.GetData(x => x.AlertRuleGuid == ruleGuid).ToList();
 
-        _recipientWoRepo.DeleteData(x => x.AlertRuleGuid == ruleGuid);
-
-        var rows = recipients
-            .Where(x => validContactGuids.Contains(x.AlertContactGuid))
-            .GroupBy(x => x.AlertContactGuid)
-            .Select(g => new AlertRuleRecipient
+        var added = desired
+            .Where(x => existing.All(e => e.AlertContactGuid != x.Key))
+            .Select(x => new AlertRuleRecipient
             {
                 Guid = Guid.NewGuid(),
                 AlertRuleGuid = ruleGuid,
-                AlertContactGuid = g.Key,
-                Channels = g.First().Channels
+                AlertContactGuid = x.Key,
+                Channels = x.Value
             })
             .ToList();
+        if (added.Count > 0)
+            _recipientWoRepo.InsertData(added);
 
-        if (rows.Count > 0)
-            _recipientWoRepo.InsertData(rows);
+        foreach (var row in existing.Where(e =>
+                     desired.TryGetValue(e.AlertContactGuid, out var channels) && channels != e.Channels))
+        {
+            var channels = desired[row.AlertContactGuid];
+            _recipientWoRepo.UpdateData(x => x.Guid == row.Guid, x => x.Channels = channels);
+        }
+
+        var removed = existing.Where(x => !desired.ContainsKey(x.AlertContactGuid)).Select(x => x.Guid).ToList();
+        if (removed.Count > 0)
+            _recipientWoRepo.DeleteData(x => removed.Contains(x.Guid));
     }
 
-    private void ValidateRecipients(string discriminator, string scopeKind, List<Guid> targets,
+    /// <summary>
+    /// Resolves once and hands the result to <see cref="ReplaceRecipients"/>: running the same
+    /// multi-query resolution twice per save also opened a window where a contact disabled between
+    /// the two calls made the second throw after the rule row had already been written.
+    /// </summary>
+    private HashSet<Guid> ValidateRecipients(string discriminator, string scopeKind, List<Guid> targets,
         List<AlertRuleRecipientIm> recipients)
     {
         if (recipients == null || recipients.Count == 0)
-            return;
+            return new HashSet<Guid>();
 
-        ResolveAssignableContactGuids(discriminator, scopeKind, targets, recipients);
+        return ResolveAssignableContactGuids(discriminator, scopeKind, targets, recipients);
     }
 
     /// <summary>
