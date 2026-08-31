@@ -6,6 +6,11 @@ using ITBees.Interfaces.Repository;
 
 namespace ITBees.Alerts.Services;
 
+/// <summary>
+/// Reads the alert history of a scope. A null scope id means "every object of this kind",
+/// matching <see cref="IAlertRulesService"/> - it must not degenerate into "ScopeId IS NULL",
+/// which would make the administration view permanently empty.
+/// </summary>
 public class AlertHistoryService : IAlertHistoryService
 {
     private const int DefaultPageSize = 25;
@@ -39,7 +44,7 @@ public class AlertHistoryService : IAlertHistoryService
         return _occurrenceRoRepo
             .GetDataPaginated(
                 x => x.Deliveries.Any(d => d.Discriminator == discriminator) &&
-                     x.ScopeKind == scope.Kind && x.ScopeId == scopeId,
+                     x.ScopeKind == scope.Kind && (scopeId == null || x.ScopeId == scopeId),
                 new SortOptions(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? DefaultPageSize, 1, 100), nameof(AlertOccurrence.CreatedUtc),
                     SortOrder.Descending))
             .MapTo(x => new AlertOccurrenceVm(x));
@@ -56,7 +61,8 @@ public class AlertHistoryService : IAlertHistoryService
         return _deliveryRoRepo
             .GetDataPaginated(
                 x => x.Discriminator == discriminator &&
-                     x.AlertOccurrence.ScopeKind == scope.Kind && x.AlertOccurrence.ScopeId == scopeId,
+                     x.AlertOccurrence.ScopeKind == scope.Kind &&
+                     (scopeId == null || x.AlertOccurrence.ScopeId == scopeId),
                 new SortOptions(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? DefaultPageSize, 1, 100), nameof(AlertDelivery.CreatedUtc),
                     SortOrder.Descending),
                 x => x.AlertOccurrence)
