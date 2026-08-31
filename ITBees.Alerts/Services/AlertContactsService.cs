@@ -12,6 +12,7 @@ public class AlertContactsService : IAlertContactsService
     private readonly IReadOnlyRepository<AlertContact> _contactRoRepo;
     private readonly IWriteOnlyRepository<AlertContact> _contactWoRepo;
     private readonly IWriteOnlyRepository<AlertRuleRecipient> _recipientWoRepo;
+    private readonly IWriteOnlyRepository<AlertDelivery> _deliveryWoRepo;
     private readonly IAlertScopeAuthorization _authorization;
     private readonly IAlertContactBookResolver _bookResolver;
     private readonly IAlertContext _alertContext;
@@ -20,6 +21,7 @@ public class AlertContactsService : IAlertContactsService
         IReadOnlyRepository<AlertContact> contactRoRepo,
         IWriteOnlyRepository<AlertContact> contactWoRepo,
         IWriteOnlyRepository<AlertRuleRecipient> recipientWoRepo,
+        IWriteOnlyRepository<AlertDelivery> deliveryWoRepo,
         IAlertScopeAuthorization authorization,
         IAlertContactBookResolver bookResolver,
         IAlertContext alertContext)
@@ -27,6 +29,7 @@ public class AlertContactsService : IAlertContactsService
         _contactRoRepo = contactRoRepo;
         _contactWoRepo = contactWoRepo;
         _recipientWoRepo = recipientWoRepo;
+        _deliveryWoRepo = deliveryWoRepo;
         _authorization = authorization;
         _bookResolver = bookResolver;
         _alertContext = alertContext;
@@ -127,6 +130,18 @@ public class AlertContactsService : IAlertContactsService
         // Drop the rule links first - a deleted contact must stop receiving straight away, and
         // the soft-deleted row only survives so the delivery log still has a name to show.
         _recipientWoRepo.DeleteData(x => x.AlertContactGuid == alertContactDm.Guid);
+
+        // Unlinking only stops FUTURE deliveries. Anything already queued carries a copy of the
+        // address in Target, and the dispatcher selects on status alone - so a message deferred
+        // by quiet hours would still reach a contact deleted hours earlier.
+        _deliveryWoRepo.UpdateData(
+            x => x.AlertContactGuid == alertContactDm.Guid && x.Status == AlertDeliveryStatus.Pending,
+            x =>
+            {
+                x.Status = AlertDeliveryStatus.Failed;
+                x.Error = "Contact was deleted before this delivery was sent";
+            });
+
         _contactWoRepo.UpdateData(x => x.Guid == alertContactDm.Guid, x =>
         {
             x.Deleted = true;
