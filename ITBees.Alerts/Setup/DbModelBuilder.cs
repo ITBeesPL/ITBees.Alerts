@@ -55,9 +55,9 @@ public class DbModelBuilder
         modelBuilder.Entity<AlertOccurrence>().HasKey(x => x.Guid);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.AlertKey).HasMaxLength(128).IsRequired();
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.ScopeKind).HasMaxLength(64).IsRequired();
-        modelBuilder.Entity<AlertOccurrence>().Property(x => x.Title).HasMaxLength(400);
-        modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceId).HasMaxLength(128);
-        modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceName).HasMaxLength(200);
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.Title).HasMaxLength(AlertContentLimits.Title);
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceId).HasMaxLength(AlertContentLimits.SourceId);
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceName).HasMaxLength(AlertContentLimits.SourceName);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.Message).HasMaxLength(AlertContentLimits.Body);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.ValuesJson).HasMaxLength(AlertContentLimits.ValuesJson);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.Link).HasMaxLength(AlertContentLimits.Link);
@@ -67,7 +67,7 @@ public class DbModelBuilder
         modelBuilder.Entity<AlertDelivery>().HasKey(x => x.Guid);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Discriminator).HasMaxLength(128).IsRequired();
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Target).HasMaxLength(320);
-        modelBuilder.Entity<AlertDelivery>().Property(x => x.Subject).HasMaxLength(400);
+        modelBuilder.Entity<AlertDelivery>().Property(x => x.Subject).HasMaxLength(AlertContentLimits.Title);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Body).HasMaxLength(AlertContentLimits.Body);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Link).HasMaxLength(AlertContentLimits.Link);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Error).HasMaxLength(500);
