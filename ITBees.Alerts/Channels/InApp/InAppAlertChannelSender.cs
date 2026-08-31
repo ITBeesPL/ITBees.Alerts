@@ -68,9 +68,10 @@ public sealed class InAppAlertChannelSender : IAlertChannelSender
         }
         catch (Exception e)
         {
-            _logger.LogWarning(e, "In-app alert delivery for scope {Scope} failed: {Message}",
-                context.Scope, e.Message);
-            return AlertDeliveryResult.Fail(e.Message);
+            // Persisted and shown in the delivery log - keep provider internals out of it.
+            _logger.LogWarning(e, "In-app alert delivery for scope {Scope} failed", context.Scope);
+            return AlertDeliveryResult.Fail(
+                $"In-app delivery failed ({e.GetType().Name}); check application logs");
         }
     }
 }

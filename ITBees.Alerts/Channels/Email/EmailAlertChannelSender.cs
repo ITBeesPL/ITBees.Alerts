@@ -49,8 +49,13 @@ public sealed class EmailAlertChannelSender : IAlertChannelSender
         }
         catch (Exception e)
         {
-            _logger.LogWarning(e, "Alert e-mail to {Target} failed: {Message}", context.Target, e.Message);
-            return Task.FromResult(AlertDeliveryResult.Fail(e.Message));
+            // The returned text is persisted to AlertDelivery.Error and served to every operator
+            // who may read this scope's delivery log, so SMTP diagnostics ("535 Authentication
+            // unsuccessful ... smtp.internal:587") stay in the application log only. This mirrors
+            // what the SMS channel already does.
+            _logger.LogWarning(e, "Alert e-mail to {Target} failed", context.Target);
+            return Task.FromResult(AlertDeliveryResult.Fail(
+                $"E-mail provider failed ({e.GetType().Name}); check application logs"));
         }
     }
 
