@@ -1,4 +1,5 @@
 using ITBees.Alerts.Controllers.Models;
+using ITBees.Alerts.DbModels;
 using ITBees.Alerts.Interfaces;
 using ITBees.Interfaces.Repository;
 using ITBees.RestfulApiControllers;
@@ -173,10 +174,10 @@ public class AlertDeliveriesController : RestfulControllerBase<AlertDeliveriesCo
     [Produces<PaginatedResult<AlertDeliveryVm>>]
     public IActionResult Get([FromQuery] string scopeKind, [FromQuery] Guid? scopeId = null,
         [FromQuery] int? page = null, [FromQuery] int? pageSize = null,
-        [FromQuery] string discriminator = null)
+        [FromQuery] string discriminator = null, [FromQuery] AlertDeliveryStatus? status = null)
     {
         return ReturnOkResult(() =>
-            _alertHistoryService.GetDeliveries(discriminator, scopeKind, scopeId, page, pageSize));
+            _alertHistoryService.GetDeliveries(discriminator, scopeKind, scopeId, page, pageSize, status));
     }
 }
 

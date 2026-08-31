@@ -51,7 +51,7 @@ public class AlertHistoryService : IAlertHistoryService
     }
 
     public PaginatedResult<AlertDeliveryVm> GetDeliveries(string requestedDiscriminator, string scopeKind,
-        Guid? scopeId, int? page, int? pageSize)
+        Guid? scopeId, int? page, int? pageSize, AlertDeliveryStatus? status = null)
     {
         var scope = new AlertScope(scopeKind, scopeId);
         var discriminator = _alertContext.ResolveDiscriminator(requestedDiscriminator);
@@ -62,7 +62,8 @@ public class AlertHistoryService : IAlertHistoryService
             .GetDataPaginated(
                 x => x.Discriminator == discriminator &&
                      x.AlertOccurrence.ScopeKind == scope.Kind &&
-                     (scopeId == null || x.AlertOccurrence.ScopeId == scopeId),
+                     (scopeId == null || x.AlertOccurrence.ScopeId == scopeId) &&
+                     (status == null || x.Status == status),
                 new SortOptions(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? DefaultPageSize, 1, 100), nameof(AlertDelivery.CreatedUtc),
                     SortOrder.Descending),
                 x => x.AlertOccurrence)

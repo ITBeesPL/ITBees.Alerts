@@ -1,4 +1,5 @@
 using ITBees.Alerts.Controllers.Models;
+using ITBees.Alerts.DbModels;
 using ITBees.Interfaces.Repository;
 
 namespace ITBees.Alerts.Interfaces;
@@ -36,8 +37,13 @@ public interface IAlertHistoryService
     PaginatedResult<AlertOccurrenceVm> GetOccurrences(string discriminator, string scopeKind, Guid? scopeId,
         int? page, int? pageSize);
 
+    /// <summary>
+    /// <paramref name="status"/> is what makes deliveries stranded in
+    /// <see cref="AlertDeliveryStatus.Processing"/> - claimed by a dispatcher that then crashed -
+    /// findable instead of buried in the full log.
+    /// </summary>
     PaginatedResult<AlertDeliveryVm> GetDeliveries(string discriminator, string scopeKind, Guid? scopeId,
-        int? page, int? pageSize);
+        int? page, int? pageSize, AlertDeliveryStatus? status = null);
 }
 
 /// <summary>Sends a sample alert through the rule that is being configured.</summary>

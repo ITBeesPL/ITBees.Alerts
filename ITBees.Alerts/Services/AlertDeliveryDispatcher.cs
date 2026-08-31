@@ -17,6 +17,13 @@ public class AlertDeliveryDispatcher : BackgroundService
     private const int BatchSize = 50;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// How long a row may sit in Processing before it is treated as abandoned by a crashed or
+    /// redeployed dispatcher. It is only ever reported, never re-sent: the outcome of an
+    /// interrupted send is unknown, so retrying could deliver the same alert twice.
+    /// </summary>
+    private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(15);
+
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<AlertDeliveryDispatcher> _logger;
 
@@ -66,6 +73,8 @@ public class AlertDeliveryDispatcher : BackgroundService
             .OrderBy(x => x.CreatedUtc)
             .Take(BatchSize)
             .ToList();
+
+        ReportStuckDeliveries(deliveryRoRepo, now);
 
         if (pending.Count == 0)
             return;
@@ -149,6 +158,24 @@ public class AlertDeliveryDispatcher : BackgroundService
                 _logger.LogWarning("Alert delivery {Guid} on {Channel} failed: {Error}",
                     delivery.Guid, delivery.Channel, result.Error);
         }
+    }
+
+    /// <summary>
+    /// Claimed rows whose dispatcher never came back are invisible to the outbox poll, which only
+    /// looks at Pending. Surfacing the count here - and through the status filter on the delivery
+    /// history endpoint - is what makes them reconcilable at all.
+    /// </summary>
+    private void ReportStuckDeliveries(IReadOnlyRepository<AlertDelivery> deliveryRoRepo, DateTime now)
+    {
+        var threshold = now - StuckAfter;
+        var stuck = deliveryRoRepo.GetDataCount(x => x.Status == AlertDeliveryStatus.Processing &&
+                                                     x.CreatedUtc <= threshold);
+        if (stuck > 0)
+            _logger.LogWarning(
+                "{Count} alert delivery(ies) have been claimed as Processing for over {Minutes} minutes; " +
+                "their send outcome is unknown and they are not retried - reconcile via the delivery log " +
+                "filtered on Processing",
+                stuck, StuckAfter.TotalMinutes);
     }
 
     /// <summary>
