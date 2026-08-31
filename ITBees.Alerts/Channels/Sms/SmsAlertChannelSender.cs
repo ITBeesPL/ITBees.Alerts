@@ -42,7 +42,7 @@ public sealed class SmsAlertChannelSender : IAlertChannelSender
     {
         var phone = Normalize(context.Target);
         if (string.IsNullOrWhiteSpace(phone))
-            return Task.FromResult(AlertDeliveryResult.Fail($"'{context.Target}' is not a phone number"));
+            return Task.FromResult(AlertDeliveryResult.Fail("Invalid phone number"));
 
         try
         {
@@ -50,10 +50,8 @@ public sealed class SmsAlertChannelSender : IAlertChannelSender
             if (_onlyToConsoleFactory())
             {
                 _logger.LogInformation(
-                    "Alert SMS console mode. Phone: {Phone}, sender: {Sender}, message: {Message}",
-                    phone,
-                    _senderNameFactory(),
-                    message);
+                    "Alert SMS console mode. Phone: {Phone}, message length: {Length}",
+                    MaskPhone(phone), message.Length);
                 return Task.FromResult(AlertDeliveryResult.Ok());
             }
 
@@ -62,8 +60,8 @@ public sealed class SmsAlertChannelSender : IAlertChannelSender
         }
         catch (Exception e)
         {
-            _logger.LogWarning(e, "Alert SMS to {Phone} failed: {Message}", phone, e.Message);
-            return Task.FromResult(AlertDeliveryResult.Fail(e.Message));
+            _logger.LogWarning("Alert SMS to {Phone} failed ({ExceptionType})", MaskPhone(phone), e.GetType().Name);
+            return Task.FromResult(AlertDeliveryResult.Fail("SMS provider failed; check provider diagnostics"));
         }
     }
 
@@ -71,6 +69,8 @@ public sealed class SmsAlertChannelSender : IAlertChannelSender
     {
         return AlertTemplateRenderer.Shorten(context.Subject, MaxLength);
     }
+
+    private static string MaskPhone(string phone) => "***" + phone[^3..];
 
     /// <summary>Strips spaces and dashes people type into contact forms; keeps a leading plus.</summary>
     private static string Normalize(string phone)

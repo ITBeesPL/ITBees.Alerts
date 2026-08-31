@@ -60,8 +60,9 @@ public class AlertsSetup
     }
 
     /// <summary>
-    /// Starts the outbox dispatcher. Call this on exactly one host - running it in several
-    /// processes is safe but pointless, since they would compete for the same rows.
+    /// Starts the outbox dispatcher. Relational EF queries atomically claim rows across instances.
+    /// Interrupted Processing rows require manual reconciliation; exactly-once delivery to an
+    /// external provider is not guaranteed. Occurrence and outbox writes are separate operations.
     /// </summary>
     public static void AddDeliveryDispatcher(IServiceCollection services)
     {

@@ -3,6 +3,7 @@ using System.Text;
 using ITBees.Alerts.Abstractions;
 using ITBees.Alerts.Configuration;
 using ITBees.Alerts.Interfaces;
+using ITBees.Alerts.Services;
 using ITBees.Mailing.Interfaces;
 using ITBees.Models.EmailAccounts;
 using Microsoft.Extensions.Logging;
@@ -33,8 +34,8 @@ public sealed class EmailAlertChannelSender : IAlertChannelSender
     public Task<AlertDeliveryResult> SendAsync(AlertDeliveryContext context,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(context.Target) || !context.Target.Contains('@'))
-            return Task.FromResult(AlertDeliveryResult.Fail($"'{context.Target}' is not an e-mail address"));
+        if (!AlertInputValidation.IsEmailAddress(context.Target))
+            return Task.FromResult(AlertDeliveryResult.Fail("Invalid e-mail address"));
 
         try
         {
@@ -89,7 +90,7 @@ public sealed class EmailAlertChannelSender : IAlertChannelSender
 
         body.AppendLine($"Czas: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");
 
-        if (!string.IsNullOrWhiteSpace(context.Link))
+        if (AlertInputValidation.IsWebLink(context.Link))
             body.AppendLine($"Szczegóły: {context.Link}");
 
         return body.ToString();
@@ -109,7 +110,7 @@ public sealed class EmailAlertChannelSender : IAlertChannelSender
 
         html.Append($"<p style=\"color:#6E7684\">Czas: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC</p>");
 
-        if (!string.IsNullOrWhiteSpace(context.Link))
+        if (AlertInputValidation.IsWebLink(context.Link))
             html.Append($"<p><a href=\"{WebUtility.HtmlEncode(context.Link)}\">Zobacz szczegóły</a></p>");
 
         html.Append("</div>");

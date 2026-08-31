@@ -94,7 +94,7 @@ public class AlertContactsService : IAlertContactsService
         if (contact == null)
             throw new FasApiErrorException("Contact not found", 404);
 
-        _bookResolver.CheckBookWrite(new AlertContactBook(contact.OwnerKind, contact.OwnerId));
+        CheckContactWrite(contact, alertContactUm.ScopeKind, alertContactUm.ScopeId);
         Validate(alertContactUm.Name, alertContactUm.Email, alertContactUm.Phone,
             alertContactUm.SmsQuietHoursEnabled, alertContactUm.SmsQuietHoursStartMinute,
             alertContactUm.SmsQuietHoursEndMinute);
@@ -122,7 +122,7 @@ public class AlertContactsService : IAlertContactsService
         if (contact == null)
             throw new FasApiErrorException("Contact not found", 404);
 
-        _bookResolver.CheckBookWrite(new AlertContactBook(contact.OwnerKind, contact.OwnerId));
+        CheckContactWrite(contact, alertContactDm.ScopeKind, alertContactDm.ScopeId);
 
         // Drop the rule links first - a deleted contact must stop receiving straight away, and
         // the soft-deleted row only survives so the delivery log still has a name to show.
@@ -143,8 +143,11 @@ public class AlertContactsService : IAlertContactsService
         if (string.IsNullOrWhiteSpace(email) && string.IsNullOrWhiteSpace(phone))
             throw new FasApiErrorException("Give the contact an e-mail address, a phone number, or both", 400);
 
-        if (!string.IsNullOrWhiteSpace(email) && (!email.Contains('@') || email.Trim().Length < 5))
-            throw new FasApiErrorException($"'{email}' is not a valid e-mail address", 400);
+        if (name.Trim().Length > 200 || email?.Trim().Length > 320 || phone?.Trim().Length > 32)
+            throw new FasApiErrorException("Contact name, e-mail or phone exceeds the maximum length", 400);
+
+        if (!string.IsNullOrWhiteSpace(email) && !AlertInputValidation.IsEmailAddress(email))
+            throw new FasApiErrorException("Invalid e-mail address", 400);
 
         if (!smsQuietHoursEnabled)
             return;
@@ -157,6 +160,20 @@ public class AlertContactsService : IAlertContactsService
             smsQuietHoursStartMinute == smsQuietHoursEndMinute)
             throw new FasApiErrorException("SMS quiet hours require different start and end times", 400);
 
+    }
+
+    private void CheckContactWrite(AlertContact contact, string scopeKind, Guid? scopeId)
+    {
+        if (string.IsNullOrWhiteSpace(scopeKind))
+            throw new FasApiErrorException("ScopeKind is required", 400);
+
+        var scope = new AlertScope(scopeKind, scopeId);
+        EnsureScopeAllowed(scope.Kind);
+        _authorization.CheckWrite(scope);
+        var book = new AlertContactBook(contact.OwnerKind, contact.OwnerId);
+        if (!_bookResolver.ResolveVisibleBooks(scope).Any(x => x.Kind == book.Kind && x.Id == book.Id))
+            throw new FasApiErrorException("Contact is not available in this scope", 403);
+        _bookResolver.CheckBookWrite(book);
     }
 
     private void EnsureScopeAllowed(string scopeKind)

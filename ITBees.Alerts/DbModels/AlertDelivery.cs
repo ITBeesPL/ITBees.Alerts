@@ -6,13 +6,13 @@ public enum AlertDeliveryStatus
 {
     Pending = 0,
     Sent = 1,
-    Failed = 2
+    Failed = 2,
+    Processing = 3
 }
 
 /// <summary>
-/// The outbox row. Deliveries are written in the same transaction as the occurrence and
-/// picked up by a background dispatcher, so a restart or a second instance cannot lose or
-/// duplicate a notification the way an in-memory queue would.
+/// A persistent delivery attempt. Processing rows are never automatically retried: a crash
+/// during sending has an unknown outcome and requires reconciliation with the channel provider.
 /// </summary>
 public class AlertDelivery
 {
@@ -41,6 +41,7 @@ public class AlertDelivery
     public AlertSeverity Severity { get; set; }
 
     public AlertDeliveryStatus Status { get; set; } = AlertDeliveryStatus.Pending;
+    public Guid? ClaimGuid { get; set; }
     public string Error { get; set; }
 
     /// <summary>Earliest dispatch time. Null means the delivery can be sent immediately.</summary>

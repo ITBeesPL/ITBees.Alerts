@@ -2,6 +2,7 @@ using ITBees.Alerts.Abstractions;
 using ITBees.Alerts.DbModels;
 using ITBees.Alerts.Interfaces;
 using ITBees.Interfaces.Repository;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -9,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace ITBees.Alerts.Services;
 
 /// <summary>
-/// Sends every pending outbox row once. A failed delivery is recorded as failed and is not retried.
+/// Atomically claims pending rows before sending. Failed and interrupted attempts are not retried.
 /// </summary>
 public class AlertDeliveryDispatcher : BackgroundService
 {
@@ -55,7 +56,6 @@ public class AlertDeliveryDispatcher : BackgroundService
         var sp = scope.ServiceProvider;
         var senders = sp.GetServices<IAlertChannelSender>().ToDictionary(x => x.Channel);
         var deliveryRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertDelivery>>();
-        var deliveryWoRepo = sp.GetRequiredService<IWriteOnlyRepository<AlertDelivery>>();
         var contactRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertContact>>();
         var now = DateTime.UtcNow;
 
@@ -93,15 +93,19 @@ public class AlertDeliveryDispatcher : BackgroundService
                 .ToList();
 
         var digestDeliveryGuids = digestDeliveries.Select(x => x.Guid).ToHashSet();
-        foreach (var group in digestDeliveries.GroupBy(x => new { x.AlertContactGuid, x.Target }))
+        foreach (var group in digestDeliveries.GroupBy(x => new { x.Discriminator, x.AlertContactGuid, x.Target }))
         {
             if (cancellationToken.IsCancellationRequested)
                 return;
 
-            var deliveries = group.ToList();
+            var claimGuid = Guid.NewGuid();
+            var deliveries = await ClaimAsync(deliveryRoRepo, group.Select(x => x.Guid).ToList(),
+                claimGuid, cancellationToken);
+            if (deliveries.Count == 0)
+                continue;
             var result = await SendAsync(senders, AlertChannels.Sms, BuildDigestContext(deliveries),
                 cancellationToken);
-            Complete(deliveryWoRepo, deliveries.Select(x => x.Guid).ToList(), result);
+            await CompleteAsync(deliveryRoRepo, claimGuid, result, cancellationToken);
 
             if (!result.Success)
                 _logger.LogWarning("SMS digest for contact {ContactGuid} failed: {Error}",
@@ -113,8 +117,12 @@ public class AlertDeliveryDispatcher : BackgroundService
             if (cancellationToken.IsCancellationRequested)
                 return;
 
-            var result = await SendAsync(senders, delivery.Channel, BuildContext(delivery), cancellationToken);
-            Complete(deliveryWoRepo, [delivery.Guid], result);
+            var claimGuid = Guid.NewGuid();
+            var claimed = await ClaimAsync(deliveryRoRepo, [delivery.Guid], claimGuid, cancellationToken);
+            if (claimed.Count == 0)
+                continue;
+            var result = await SendAsync(senders, delivery.Channel, BuildContext(claimed[0]), cancellationToken);
+            await CompleteAsync(deliveryRoRepo, claimGuid, result, cancellationToken);
 
             if (!result.Success)
                 _logger.LogWarning("Alert delivery {Guid} on {Channel} failed: {Error}",
@@ -140,16 +148,33 @@ public class AlertDeliveryDispatcher : BackgroundService
         }
     }
 
-    private static void Complete(IWriteOnlyRepository<AlertDelivery> deliveryWoRepo, List<Guid> deliveryGuids,
-        AlertDeliveryResult result)
+    private static async Task<List<AlertDelivery>> ClaimAsync(IReadOnlyRepository<AlertDelivery> deliveryRoRepo,
+        List<Guid> deliveryGuids, Guid claimGuid, CancellationToken cancellationToken)
+    {
+        var claimed = await deliveryRoRepo.GetDataQueryable(x =>
+                deliveryGuids.Contains(x.Guid) && x.Status == AlertDeliveryStatus.Pending)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.Status, AlertDeliveryStatus.Processing)
+                .SetProperty(x => x.ClaimGuid, (Guid?)claimGuid), cancellationToken);
+        if (claimed == 0)
+            return [];
+
+        return await deliveryRoRepo.GetDataQueryable(x => x.ClaimGuid == claimGuid,
+                x => x.AlertOccurrence)
+            .AsNoTracking().OrderBy(x => x.CreatedUtc).ToListAsync(cancellationToken);
+    }
+
+    private static Task<int> CompleteAsync(IReadOnlyRepository<AlertDelivery> deliveryRoRepo, Guid claimGuid,
+        AlertDeliveryResult result, CancellationToken cancellationToken)
     {
         var completedUtc = DateTime.UtcNow;
-        deliveryWoRepo.UpdateData(x => deliveryGuids.Contains(x.Guid), x =>
-        {
-            x.Status = result.Success ? AlertDeliveryStatus.Sent : AlertDeliveryStatus.Failed;
-            x.SentUtc = result.Success ? completedUtc : null;
-            x.Error = result.Success ? null : Truncate(result.Error, 500);
-        });
+        var status = result.Success ? AlertDeliveryStatus.Sent : AlertDeliveryStatus.Failed;
+        DateTime? sentUtc = result.Success ? completedUtc : null;
+        var error = result.Success ? null : Truncate(result.Error, 500);
+        return deliveryRoRepo.GetDataQueryable(x => x.ClaimGuid == claimGuid &&
+                x.Status == AlertDeliveryStatus.Processing)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.Status, status)
+                .SetProperty(x => x.SentUtc, sentUtc).SetProperty(x => x.Error, error), cancellationToken);
     }
 
     private static AlertDeliveryContext BuildContext(AlertDelivery delivery) => new()

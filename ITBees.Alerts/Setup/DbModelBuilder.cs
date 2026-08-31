@@ -1,4 +1,5 @@
 using ITBees.Alerts.DbModels;
+using ITBees.Alerts.Abstractions;
 using Microsoft.EntityFrameworkCore;
 
 namespace ITBees.Alerts.Setup;
@@ -57,19 +58,25 @@ public class DbModelBuilder
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.Title).HasMaxLength(400);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceId).HasMaxLength(128);
         modelBuilder.Entity<AlertOccurrence>().Property(x => x.SourceName).HasMaxLength(200);
-        // Deduplication runs on every raised alert, so this index carries the hot path.
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.Message).HasMaxLength(AlertContentLimits.Body);
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.ValuesJson).HasMaxLength(AlertContentLimits.ValuesJson);
+        modelBuilder.Entity<AlertOccurrence>().Property(x => x.Link).HasMaxLength(AlertContentLimits.Link);
+        // Scoped history, ordered by occurrence time.
         modelBuilder.Entity<AlertOccurrence>().HasIndex(x => new { x.ScopeKind, x.ScopeId, x.CreatedUtc });
 
         modelBuilder.Entity<AlertDelivery>().HasKey(x => x.Guid);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Discriminator).HasMaxLength(128).IsRequired();
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Target).HasMaxLength(320);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Subject).HasMaxLength(400);
+        modelBuilder.Entity<AlertDelivery>().Property(x => x.Body).HasMaxLength(AlertContentLimits.Body);
+        modelBuilder.Entity<AlertDelivery>().Property(x => x.Link).HasMaxLength(AlertContentLimits.Link);
         modelBuilder.Entity<AlertDelivery>().Property(x => x.Error).HasMaxLength(500);
+        modelBuilder.Entity<AlertDelivery>().HasIndex(x => x.ClaimGuid);
         // The outbox poll: pending rows that are due.
         modelBuilder.Entity<AlertDelivery>().HasIndex(x => new { x.Status, x.NotBeforeUtc, x.CreatedUtc });
         modelBuilder.Entity<AlertDelivery>()
             .HasOne(x => x.AlertOccurrence)
-            .WithMany()
+            .WithMany(x => x.Deliveries)
             .HasForeignKey(x => x.AlertOccurrenceGuid)
             .OnDelete(DeleteBehavior.Cascade);
 

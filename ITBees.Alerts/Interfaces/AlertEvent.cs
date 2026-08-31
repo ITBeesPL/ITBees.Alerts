@@ -20,7 +20,11 @@ public class AlertEvent
 
     public AlertScope Scope { get; set; }
 
-    /// <summary>Optional owner application restriction, primarily used by test sends.</summary>
+    /// <summary>
+    /// Restricts delivery to rules of this application. Null intentionally broadcasts to matching
+    /// rules of ALL applications sharing the database. Only trusted internal producers may use
+    /// null; user-triggered events must resolve the discriminator through IAlertContext.
+    /// </summary>
     public string Discriminator { get; set; }
 
     /// <summary>Null falls back to the catalog default.</summary>

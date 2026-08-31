@@ -76,6 +76,8 @@ public class AlertContactUm : RestUm
 
     public Guid Guid { get; set; }
     public string Discriminator { get; set; }
+    public string ScopeKind { get; set; }
+    public Guid? ScopeId { get; set; }
     public string Name { get; set; }
     public string Email { get; set; }
     public string Phone { get; set; }
@@ -92,4 +94,6 @@ public class AlertContactDm : RestDm
 
     public Guid Guid { get; set; }
     public string Discriminator { get; set; }
+    public string ScopeKind { get; set; }
+    public Guid? ScopeId { get; set; }
 }

@@ -48,6 +48,7 @@ public class AlertPublisher : IAlertPublisher
                 return Task.CompletedTask;
 
             alertEvent.Values ??= new Dictionary<string, string>();
+            ValidatePayload(alertEvent);
             var scopeName = sp.GetService<IAlertScopeNameResolver>()?.ResolveName(alertEvent.Scope);
             if (!string.IsNullOrWhiteSpace(scopeName) &&
                 !alertEvent.Values.ContainsKey("parking"))
@@ -58,6 +59,9 @@ public class AlertPublisher : IAlertPublisher
             var message = AlertTemplateRenderer.Render(definition.DefaultMessageTemplate, alertEvent.Values);
             title = IncludeScopeName(title, scopeName, null, " — ");
             message = IncludeScopeName(message, scopeName, "Parking: ", Environment.NewLine);
+            var valuesJson = Serialize(alertEvent.Values);
+            title = AlertTemplateRenderer.Shorten(title, AlertContentLimits.Title);
+            message = AlertTemplateRenderer.Shorten(message, AlertContentLimits.Body);
             var now = DateTime.UtcNow;
 
             var occurrence = sp.GetRequiredService<IWriteOnlyRepository<AlertOccurrence>>()
@@ -73,7 +77,7 @@ public class AlertPublisher : IAlertPublisher
                     SourceId = alertEvent.SourceId,
                     SourceName = alertEvent.SourceName,
                     Link = alertEvent.Link,
-                    ValuesJson = Serialize(alertEvent.Values),
+                    ValuesJson = valuesJson,
                     CreatedUtc = now
                 });
 
@@ -145,7 +149,8 @@ public class AlertPublisher : IAlertPublisher
 
             var recipients = recipientRoRepo
                 .GetData(x => x.AlertRuleGuid == rule.Guid, x => x.AlertContact)
-                .Where(x => x.AlertContact != null && x.AlertContact.Enabled && !x.AlertContact.Deleted)
+                .Where(x => x.AlertContact != null && x.AlertContact.Enabled && !x.AlertContact.Deleted &&
+                            x.AlertContact.Discriminator == rule.Discriminator)
                 .ToList();
 
             foreach (var recipient in recipients)
@@ -195,7 +200,7 @@ public class AlertPublisher : IAlertPublisher
         AlertContactGuid = contactGuid,
         Channel = channel,
         Target = target,
-        Subject = subject,
+        Subject = AlertTemplateRenderer.Shorten(subject, AlertContentLimits.Title),
         Body = body,
         Link = link,
         Severity = severity,
@@ -218,14 +223,18 @@ public class AlertPublisher : IAlertPublisher
 
     private static string Serialize(IDictionary<string, string> values)
     {
-        try
-        {
-            return values == null || values.Count == 0 ? null : JsonSerializer.Serialize(values);
-        }
-        catch
-        {
-            return null;
-        }
+        var json = values == null || values.Count == 0 ? null : JsonSerializer.Serialize(values);
+        if (json?.Length > AlertContentLimits.ValuesJson)
+            throw new ArgumentException("Alert values exceed the maximum serialized length");
+        return json;
+    }
+
+    private static void ValidatePayload(AlertEvent alertEvent)
+    {
+        if (alertEvent.Link?.Length > AlertContentLimits.Link || alertEvent.SourceId?.Length > 128 ||
+            alertEvent.SourceName?.Length > 200 || alertEvent.Values.Count > 100 ||
+            alertEvent.Values.Any(x => x.Key.Length > 128 || x.Value?.Length > AlertContentLimits.Body))
+            throw new ArgumentException("Alert payload exceeds content limits");
     }
 
     private static string IncludeScopeName(string text, string scopeName, string prefix, string separator)

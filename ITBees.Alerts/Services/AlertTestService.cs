@@ -45,8 +45,6 @@ public class AlertTestService : IAlertTestService
         var before = DateTime.UtcNow;
         var discriminator = _alertContext.ResolveDiscriminator(alertTestIm.Discriminator);
 
-        // A unique dedupe key means the test always goes out, even if the same alert is open
-        // and inside its cooldown right now.
         _publisher.RaiseAsync(new AlertEvent(definition.Key, scope)
             {
                 Severity = definition.DefaultSeverity,

@@ -36,16 +36,11 @@ public class AlertHistoryService : IAlertHistoryService
         EnsureScopeAllowed(scope.Kind);
         _authorization.CheckRead(scope);
 
-        var occurrenceGuids = _deliveryRoRepo
-            .GetData(x => x.Discriminator == discriminator)
-            .Select(x => x.AlertOccurrenceGuid)
-            .Distinct()
-            .ToList();
-
         return _occurrenceRoRepo
             .GetDataPaginated(
-                x => occurrenceGuids.Contains(x.Guid) && x.ScopeKind == scope.Kind && x.ScopeId == scopeId,
-                new SortOptions(page ?? 1, pageSize ?? DefaultPageSize, nameof(AlertOccurrence.CreatedUtc),
+                x => x.Deliveries.Any(d => d.Discriminator == discriminator) &&
+                     x.ScopeKind == scope.Kind && x.ScopeId == scopeId,
+                new SortOptions(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? DefaultPageSize, 1, 100), nameof(AlertOccurrence.CreatedUtc),
                     SortOrder.Descending))
             .MapTo(x => new AlertOccurrenceVm(x));
     }
@@ -62,7 +57,7 @@ public class AlertHistoryService : IAlertHistoryService
             .GetDataPaginated(
                 x => x.Discriminator == discriminator &&
                      x.AlertOccurrence.ScopeKind == scope.Kind && x.AlertOccurrence.ScopeId == scopeId,
-                new SortOptions(page ?? 1, pageSize ?? DefaultPageSize, nameof(AlertDelivery.CreatedUtc),
+                new SortOptions(Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? DefaultPageSize, 1, 100), nameof(AlertDelivery.CreatedUtc),
                     SortOrder.Descending),
                 x => x.AlertOccurrence)
             .MapTo(x => new AlertDeliveryVm(x));

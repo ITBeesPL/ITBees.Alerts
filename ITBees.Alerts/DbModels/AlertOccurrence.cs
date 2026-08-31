@@ -26,4 +26,5 @@ public class AlertOccurrence
     public string ValuesJson { get; set; }
 
     public DateTime CreatedUtc { get; set; }
+    public ICollection<AlertDelivery> Deliveries { get; set; } = new List<AlertDelivery>();
 }
