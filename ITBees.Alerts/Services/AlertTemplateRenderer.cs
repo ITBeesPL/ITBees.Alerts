@@ -25,17 +25,27 @@ public static class AlertTemplateRenderer
         return result.ToString();
     }
 
-    /// <summary>SMS bodies are metered — cut long text on a word boundary and mark the cut.</summary>
+    /// <summary>
+    /// SMS bodies are metered - cut long text on a word boundary and mark the cut. The marker is
+    /// plain ASCII on purpose: an ellipsis (U+2026) is outside the GSM 03.38 alphabet, and a
+    /// single such character switches the whole message to UCS-2, where one part is 70 characters
+    /// instead of 160 - so the provider would bill three parts for the text this cut exists to
+    /// keep down to one.
+    /// </summary>
     public static string Shorten(string text, int maxLength)
     {
         if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
             return text;
 
-        var cut = text.Substring(0, maxLength - 1);
+        const string marker = "...";
+        if (maxLength <= marker.Length)
+            return text.Substring(0, Math.Max(0, maxLength));
+
+        var cut = text.Substring(0, maxLength - marker.Length);
         var lastSpace = cut.LastIndexOf(' ');
         if (lastSpace > maxLength / 2)
             cut = cut.Substring(0, lastSpace);
 
-        return cut.TrimEnd() + "…";
+        return cut.TrimEnd() + marker;
     }
 }

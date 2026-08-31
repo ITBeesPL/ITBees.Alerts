@@ -12,14 +12,21 @@ public readonly struct AlertContactBook : IEquatable<AlertContactBook>
 {
     public const string PlatformKind = "platform";
 
+    private readonly string _kind;
+
     public AlertContactBook(string kind, Guid? id = null)
     {
-        Kind = string.IsNullOrWhiteSpace(kind) ? PlatformKind : kind.Trim().ToLowerInvariant();
+        _kind = Normalize(kind);
         Id = id;
     }
 
-    public string Kind { get; }
+    /// <summary>Normalising getter, so <c>default(AlertContactBook)</c> still names a real book.</summary>
+    public string Kind => _kind ?? PlatformKind;
+
     public Guid? Id { get; }
+
+    private static string Normalize(string kind) =>
+        string.IsNullOrWhiteSpace(kind) ? PlatformKind : kind.Trim().ToLowerInvariant();
 
     public static AlertContactBook Platform => new(PlatformKind);
     public static AlertContactBook For(string kind, Guid id) => new(kind, id);

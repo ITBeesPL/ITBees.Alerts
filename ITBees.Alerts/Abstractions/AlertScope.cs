@@ -10,14 +10,25 @@ public readonly struct AlertScope : IEquatable<AlertScope>
 {
     public const string GlobalKind = "global";
 
+    private readonly string _kind;
+
     public AlertScope(string kind, Guid? id = null)
     {
-        Kind = string.IsNullOrWhiteSpace(kind) ? GlobalKind : kind.Trim().ToLowerInvariant();
+        _kind = Normalize(kind);
         Id = id;
     }
 
-    public string Kind { get; }
+    /// <summary>
+    /// Read through a normalising getter rather than an auto-property: this is a struct, so
+    /// <c>default(AlertScope)</c> and any object initialiser that sets a scope-typed property
+    /// bypass the constructor. Returning null there would silently match no rule at all.
+    /// </summary>
+    public string Kind => _kind ?? GlobalKind;
+
     public Guid? Id { get; }
+
+    private static string Normalize(string kind) =>
+        string.IsNullOrWhiteSpace(kind) ? GlobalKind : kind.Trim().ToLowerInvariant();
 
     public static AlertScope Global => new(GlobalKind);
     public static AlertScope For(string kind, Guid id) => new(kind, id);
