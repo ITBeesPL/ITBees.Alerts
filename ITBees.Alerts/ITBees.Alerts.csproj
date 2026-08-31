@@ -8,7 +8,7 @@
         <Version>8.0.1</Version>
         <Authors>ITBeesPL</Authors>
         <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
-        <Description>Reusable alerting for ITBees applications: catalog, per-scope routing rules, deduplication, delivery outbox and e-mail, SMS and in-app channels.</Description>
+        <Description>Reusable alerting for ITBees applications: catalog, per-scope routing rules, delivery outbox and e-mail, SMS and in-app channels.</Description>
     </PropertyGroup>
 
     <ItemGroup>
