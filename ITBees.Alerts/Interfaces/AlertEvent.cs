@@ -1,3 +1,4 @@
+using System.Globalization;
 using ITBees.Alerts.Abstractions;
 
 namespace ITBees.Alerts.Interfaces;
@@ -39,9 +40,25 @@ public class AlertEvent
     /// <summary>Deep link opened from the bell.</summary>
     public string Link { get; set; }
 
+    /// <summary>
+    /// Restricts delivery to these rules. The threshold evaluator sets it, because it has already
+    /// decided which subscriptions crossed their own comparison value and must not let the
+    /// publisher re-match every other rule of the same alert kind. Null - the normal case for an
+    /// event-driven producer - lets every matching rule fire.
+    /// </summary>
+    public IReadOnlyCollection<Guid> RuleGuids { get; set; }
+
+    /// <summary>
+    /// Numbers are formatted invariantly on purpose: the rendered text and the persisted
+    /// ValuesJson must not change meaning with the host's thread culture (a threshold would read
+    /// "92,5" on one deployment and "92.5" on another, and the same alert would serialise
+    /// differently). Display localisation belongs to the frontend, which resolves labels by key.
+    /// </summary>
     public AlertEvent With(string name, object value)
     {
-        Values[name] = value?.ToString();
+        Values[name] = value is IFormattable formattable
+            ? formattable.ToString(null, CultureInfo.InvariantCulture)
+            : value?.ToString();
         return this;
     }
 }

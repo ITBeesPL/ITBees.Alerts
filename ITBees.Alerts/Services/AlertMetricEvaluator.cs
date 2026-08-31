@@ -27,6 +27,7 @@ public class AlertMetricEvaluator : BackgroundService
     private readonly IAlertPublisher _publisher;
     private readonly ILogger<AlertMetricEvaluator> _logger;
     private readonly HashSet<string> _activeConditions = new();
+    private readonly HashSet<Guid> _reportedUnreachableRules = new();
 
     public AlertMetricEvaluator(IServiceProvider serviceProvider, IAlertCatalog catalog, IAlertPublisher publisher,
         ILogger<AlertMetricEvaluator> logger)
@@ -119,23 +120,43 @@ public class AlertMetricEvaluator : BackgroundService
 
             foreach (var reading in readings)
             {
-                var rule = PickRule(rules, reading.Scope);
-                if (rule == null)
-                    continue;
-
-                if (rule.ComparisonOperator == AlertComparisonOperator.None || rule.ComparisonValue == null)
-                    continue;
-
-                var conditionKey = $"{definition.Key}|{rule.Guid}|{rule.ComparisonOperator}|" +
-                                   $"{rule.ComparisonValue}|{reading.Scope}|{reading.SourceId}";
-                if (Matches(reading.Value, rule.ComparisonOperator, rule.ComparisonValue.Value))
+                // Every rule covering this object is evaluated against its OWN threshold. Picking
+                // a single rule meant a second subscription with a lower threshold was never
+                // checked, while the alert it did raise still fanned out to that rule anyway.
+                foreach (var rule in rules.Where(x => x.ScopeKind == reading.Scope.Kind &&
+                                                      AlertRuleCoverage.Covers(x, reading.Scope.Id)))
                 {
+                    if (rule.ComparisonOperator == AlertComparisonOperator.None || rule.ComparisonValue == null)
+                        continue;
+
+                    // Threshold alerts are always published at the catalog default severity, so a
+                    // rule subscribing above it can never fire. Say so instead of losing the alert.
+                    if (definition.DefaultSeverity < rule.MinSeverity)
+                    {
+                        if (_reportedUnreachableRules.Add(rule.Guid))
+                            _logger.LogWarning(
+                                "Alert rule {Rule} for {Key} requires {MinSeverity} but the metric is " +
+                                "published as {DefaultSeverity}, so it can never fire",
+                                rule.Guid, definition.Key, rule.MinSeverity, definition.DefaultSeverity);
+                        continue;
+                    }
+
+                    var conditionKey = $"{definition.Key}|{rule.Guid}|{rule.ComparisonOperator}|" +
+                                       $"{rule.ComparisonValue}|{reading.Scope}|{reading.SourceId}";
+                    if (!Matches(reading.Value, rule.ComparisonOperator, rule.ComparisonValue.Value))
+                        continue;
+
                     matchingConditions.Add(conditionKey);
                     if (!_activeConditions.Add(conditionKey))
                         continue;
 
+                    // Addressed at the one rule that crossed, and at its own application - otherwise
+                    // the publisher would re-match every rule of this alert kind, including those
+                    // whose threshold was not reached and those of other applications.
                     await _publisher.RaiseAsync(new AlertEvent(definition.Key, reading.Scope)
                         {
+                            Discriminator = rule.Discriminator,
+                            RuleGuids = new[] { rule.Guid },
                             SourceId = reading.SourceId,
                             SourceName = reading.SourceName
                         }
@@ -150,11 +171,6 @@ public class AlertMetricEvaluator : BackgroundService
         _activeConditions.RemoveWhere(x =>
             !matchingConditions.Contains(x) && evaluatedDefinitionKeys.Contains(DefinitionKeyOf(x)));
     }
-
-    /// <summary>A rule targeting the exact object wins over the catch-all covering every object.</summary>
-    private static AlertRule PickRule(List<AlertRule> rules, AlertScope scope) =>
-        rules.FirstOrDefault(x => x.ScopeKind == scope.Kind && x.Targets.Any(t => t.ScopeId == scope.Id))
-        ?? rules.FirstOrDefault(x => x.ScopeKind == scope.Kind && x.Targets.Count == 0);
 
     /// <summary>The condition key is prefixed with its alert key so the cycle can prune selectively.</summary>
     private static string DefinitionKeyOf(string conditionKey)
