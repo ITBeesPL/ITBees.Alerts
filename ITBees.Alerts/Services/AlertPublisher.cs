@@ -43,12 +43,13 @@ public class AlertPublisher : IAlertPublisher
             using var scope = _serviceProvider.CreateScope();
             var sp = scope.ServiceProvider;
             var severity = alertEvent.Severity ?? definition.DefaultSeverity;
-            var rules = MatchRules(sp, definition, alertEvent.Scope, severity, alertEvent.Discriminator);
+            var rules = MatchRules(sp, definition, alertEvent.Scope, severity, alertEvent.Discriminator,
+                alertEvent.RuleGuids);
             if (rules.Count == 0)
                 return Task.CompletedTask;
 
             alertEvent.Values ??= new Dictionary<string, string>();
-            ValidatePayload(alertEvent);
+            NormalizePayload(alertEvent);
             var scopeName = sp.GetService<IAlertScopeNameResolver>()?.ResolveName(alertEvent.Scope);
             if (!string.IsNullOrWhiteSpace(scopeName) &&
                 !alertEvent.Values.ContainsKey("parking"))
@@ -59,7 +60,7 @@ public class AlertPublisher : IAlertPublisher
             var message = AlertTemplateRenderer.Render(definition.DefaultMessageTemplate, alertEvent.Values);
             title = IncludeScopeName(title, scopeName, null, " — ");
             message = IncludeScopeName(message, scopeName, "Parking: ", Environment.NewLine);
-            var valuesJson = Serialize(alertEvent.Values);
+            var valuesJson = Serialize(definition.Key, alertEvent.Values);
             title = AlertTemplateRenderer.Shorten(title, AlertContentLimits.Title);
             message = AlertTemplateRenderer.Shorten(message, AlertContentLimits.Body);
             var now = DateTime.UtcNow;
@@ -93,14 +94,14 @@ public class AlertPublisher : IAlertPublisher
     }
 
     private static List<AlertRule> MatchRules(IServiceProvider sp, AlertDefinition definition, AlertScope scope,
-        AlertSeverity severity, string discriminator)
+        AlertSeverity severity, string discriminator, IReadOnlyCollection<Guid> ruleGuids)
     {
         var ruleRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertRule>>();
         var candidates = ruleRoRepo.GetDataQueryable(
                 x => !x.Deleted && x.Enabled && x.AlertKey == definition.Key && x.ScopeKind == scope.Kind &&
-                     (discriminator == null || x.Discriminator == discriminator))
-            .ToList()
-            .Where(x => severity >= x.MinSeverity)
+                     x.MinSeverity <= severity &&
+                     (discriminator == null || x.Discriminator == discriminator) &&
+                     (ruleGuids == null || ruleGuids.Contains(x.Guid)))
             .ToList();
         if (candidates.Count == 0)
             return candidates;
@@ -113,11 +114,8 @@ public class AlertPublisher : IAlertPublisher
             .ToList();
 
         return candidates
-            .Where(rule =>
-            {
-                var ruleTargets = targets.Where(x => x.AlertRuleGuid == rule.Guid).ToList();
-                return ruleTargets.Count == 0 || ruleTargets.Any(x => x.ScopeId == scope.Id);
-            })
+            .Where(rule => AlertRuleCoverage.Covers(
+                targets.Where(x => x.AlertRuleGuid == rule.Guid).ToList(), scope.Id))
             .ToList();
     }
 
@@ -221,20 +219,35 @@ public class AlertPublisher : IAlertPublisher
         return IncludeScopeName(title, scopeName, null, " — ");
     }
 
-    private static string Serialize(IDictionary<string, string> values)
+    /// <summary>
+    /// Sheds the largest entries until the serialized form fits, rather than throwing away the
+    /// whole alert. Values are display detail; the title, message and routing survive regardless.
+    /// </summary>
+    private string Serialize(string alertKey, IDictionary<string, string> values)
     {
-        var json = values == null || values.Count == 0 ? null : JsonSerializer.Serialize(values);
-        if (json?.Length > AlertContentLimits.ValuesJson)
-            throw new ArgumentException("Alert values exceed the maximum serialized length");
-        return json;
+        if (values == null || values.Count == 0)
+            return null;
+
+        var remaining = new Dictionary<string, string>(values);
+        var json = JsonSerializer.Serialize(remaining);
+        while (json.Length > AlertContentLimits.ValuesJson && remaining.Count > 0)
+        {
+            var largest = remaining.OrderByDescending(x => x.Value?.Length ?? 0).First().Key;
+            remaining.Remove(largest);
+            _logger.LogWarning("Alert {Key}: value '{Name}' dropped to fit the serialized limit",
+                alertKey, largest);
+            json = JsonSerializer.Serialize(remaining);
+        }
+
+        return remaining.Count == 0 ? null : json;
     }
 
-    private static void ValidatePayload(AlertEvent alertEvent)
+    private void NormalizePayload(AlertEvent alertEvent)
     {
-        if (alertEvent.Link?.Length > AlertContentLimits.Link || alertEvent.SourceId?.Length > 128 ||
-            alertEvent.SourceName?.Length > 200 || alertEvent.Values.Count > 100 ||
-            alertEvent.Values.Any(x => x.Key.Length > 128 || x.Value?.Length > AlertContentLimits.Body))
-            throw new ArgumentException("Alert payload exceeds content limits");
+        var dropped = AlertPayloadNormalizer.Normalize(alertEvent);
+        if (dropped > 0)
+            _logger.LogWarning("Alert {Key}: {Count} value(s) dropped as unusable or over the entry limit",
+                alertEvent.Key, dropped);
     }
 
     private static string IncludeScopeName(string text, string scopeName, string prefix, string separator)
