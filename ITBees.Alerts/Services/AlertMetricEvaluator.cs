@@ -64,6 +64,10 @@ public class AlertMetricEvaluator : BackgroundService
     private async Task EvaluateAsync(CancellationToken cancellationToken)
     {
         var matchingConditions = new HashSet<string>();
+        // Only definitions we actually managed to read this cycle may have their remembered
+        // conditions cleared. Pruning a definition we skipped would treat a still-true condition
+        // as freshly crossed on the next cycle and re-alert for it.
+        var evaluatedDefinitionKeys = new HashSet<string>();
         var metricDefinitions = _catalog.All
             .Where(x => !string.IsNullOrWhiteSpace(x.MetricKey))
             .ToList();
@@ -96,9 +100,22 @@ public class AlertMetricEvaluator : BackgroundService
             if (source == null)
                 continue;
 
-            var readings = await source.ReadAsync(definition.MetricKey, cancellationToken);
+            IReadOnlyCollection<AlertMetricReading> readings;
+            try
+            {
+                readings = await source.ReadAsync(definition.MetricKey, cancellationToken);
+            }
+            catch (Exception e) when (!cancellationToken.IsCancellationRequested)
+            {
+                // One flaky source must not abort the cycle for every other definition.
+                _logger.LogWarning(e, "Alert metric source for {MetricKey} failed", definition.MetricKey);
+                continue;
+            }
+
             if (readings == null || readings.Count == 0)
                 continue;
+
+            evaluatedDefinitionKeys.Add(definition.Key);
 
             foreach (var reading in readings)
             {
@@ -109,8 +126,8 @@ public class AlertMetricEvaluator : BackgroundService
                 if (rule.ComparisonOperator == AlertComparisonOperator.None || rule.ComparisonValue == null)
                     continue;
 
-                var conditionKey = $"{rule.Guid}|{rule.ComparisonOperator}|{rule.ComparisonValue}|" +
-                                   $"{reading.Scope}|{reading.SourceId}";
+                var conditionKey = $"{definition.Key}|{rule.Guid}|{rule.ComparisonOperator}|" +
+                                   $"{rule.ComparisonValue}|{reading.Scope}|{reading.SourceId}";
                 if (Matches(reading.Value, rule.ComparisonOperator, rule.ComparisonValue.Value))
                 {
                     matchingConditions.Add(conditionKey);
@@ -130,13 +147,21 @@ public class AlertMetricEvaluator : BackgroundService
             }
         }
 
-        _activeConditions.RemoveWhere(x => !matchingConditions.Contains(x));
+        _activeConditions.RemoveWhere(x =>
+            !matchingConditions.Contains(x) && evaluatedDefinitionKeys.Contains(DefinitionKeyOf(x)));
     }
 
     /// <summary>A rule targeting the exact object wins over the catch-all covering every object.</summary>
     private static AlertRule PickRule(List<AlertRule> rules, AlertScope scope) =>
         rules.FirstOrDefault(x => x.ScopeKind == scope.Kind && x.Targets.Any(t => t.ScopeId == scope.Id))
         ?? rules.FirstOrDefault(x => x.ScopeKind == scope.Kind && x.Targets.Count == 0);
+
+    /// <summary>The condition key is prefixed with its alert key so the cycle can prune selectively.</summary>
+    private static string DefinitionKeyOf(string conditionKey)
+    {
+        var separator = conditionKey.IndexOf('|');
+        return separator < 0 ? conditionKey : conditionKey.Substring(0, separator);
+    }
 
     private static bool Matches(double value, AlertComparisonOperator comparisonOperator, double expected) =>
         comparisonOperator switch
