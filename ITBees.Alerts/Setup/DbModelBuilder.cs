@@ -80,5 +80,11 @@ public class DbModelBuilder
             .HasForeignKey(x => x.AlertOccurrenceGuid)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // Cooldown state. Looked up by primary key on every raised alert, so it needs no
+        // secondary index; the key is the hash itself.
+        modelBuilder.Entity<AlertThrottleState>().HasKey(x => x.ThrottleKey);
+        modelBuilder.Entity<AlertThrottleState>().Property(x => x.ThrottleKey).HasMaxLength(64).IsRequired();
+        modelBuilder.Entity<AlertThrottleState>().Property(x => x.Discriminator).HasMaxLength(128);
+        modelBuilder.Entity<AlertThrottleState>().Property(x => x.AlertKey).HasMaxLength(128);
     }
 }

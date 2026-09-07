@@ -65,6 +65,22 @@ public class AlertPublisher : IAlertPublisher
             message = AlertTemplateRenderer.Shorten(message, AlertContentLimits.Body);
             var now = DateTime.UtcNow;
 
+            // Cooldown, once the content is known: a repeat inside the window writes neither an
+            // occurrence nor a delivery. Suppressing here rather than at delivery time is what
+            // keeps a device stuck in a fault loop from filling the history table as well.
+            var throttleMinutes = alertEvent.IgnoreThrottle ? 0 : AlertThrottle.ResolveMinutes(rules, definition);
+            if (throttleMinutes > 0)
+            {
+                var throttleKey = AlertThrottle.BuildKey(definition, alertEvent, title, message);
+                if (!AlertThrottle.TryEnterWindow(sp, throttleKey, definition, alertEvent, throttleMinutes, now,
+                        _logger))
+                {
+                    _logger.LogDebug("Alert {Key} suppressed - identical alert already sent within {Minutes} min",
+                        definition.Key, throttleMinutes);
+                    return Task.CompletedTask;
+                }
+            }
+
             var occurrence = sp.GetRequiredService<IWriteOnlyRepository<AlertOccurrence>>()
                 .InsertData(new AlertOccurrence
                 {

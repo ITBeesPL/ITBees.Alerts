@@ -47,6 +47,14 @@ public class AlertDefinition
     /// <summary>Unit displayed next to the numeric comparison value, e.g. %, MB/s.</summary>
     public string ValueUnit { get; set; }
 
+    /// <summary>
+    /// How long the same alert (same scope, same source, same content) stays silent after one
+    /// was delivered. Null or 0 means no cooldown — every repeat is recorded and delivered,
+    /// which is the historical behaviour and stays the default for every alert that does not
+    /// opt in. A rule may override this per subscription.
+    /// </summary>
+    public int? ThrottleMinutes { get; set; }
+
     /// <summary>Fallback text used when a rule has no custom message. Supports <c>{placeholder}</c> from the event values.</summary>
     public string DefaultTitleTemplate { get; set; }
 

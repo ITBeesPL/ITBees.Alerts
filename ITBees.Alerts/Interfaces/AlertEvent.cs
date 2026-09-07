@@ -41,6 +41,13 @@ public class AlertEvent
     public string Link { get; set; }
 
     /// <summary>
+    /// Skips the cooldown. Set it for events a human explicitly asked for - a test send has
+    /// identical content every time, so without this the second test in a window would vanish
+    /// and the screen would report that nothing was sent.
+    /// </summary>
+    public bool IgnoreThrottle { get; set; }
+
+    /// <summary>
     /// Restricts delivery to these rules. The threshold evaluator sets it, because it has already
     /// decided which subscriptions crossed their own comparison value and must not let the
     /// publisher re-match every other rule of the same alert kind. Null - the normal case for an

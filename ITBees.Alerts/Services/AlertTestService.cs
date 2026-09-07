@@ -49,7 +49,8 @@ public class AlertTestService : IAlertTestService
             {
                 Severity = definition.DefaultSeverity,
                 Discriminator = discriminator,
-                SourceName = "Test"
+                SourceName = "Test",
+                IgnoreThrottle = true
             }
             .With("value", "—")
             .With("threshold", "—")
