@@ -27,6 +27,7 @@ public class AlertRuleVm : RestVm
         ComparisonOperator = rule.ComparisonOperator;
         ComparisonValue = rule.ComparisonValue;
         CustomMessage = rule.CustomMessage;
+        ThrottleMinutes = rule.ThrottleMinutes;
         Recipients = (rule.Recipients ?? new List<AlertRuleRecipient>())
             .Select(x => new AlertRuleRecipientVm(x)).ToList();
     }
@@ -50,6 +51,9 @@ public class AlertRuleVm : RestVm
     public AlertComparisonOperator ComparisonOperator { get; set; }
     public double? ComparisonValue { get; set; }
     public string CustomMessage { get; set; }
+
+    /// <summary>Cooldown for this rule in minutes. Null inherits the catalog default, 0 disables it.</summary>
+    public int? ThrottleMinutes { get; set; }
     public List<AlertRuleRecipientVm> Recipients { get; set; }
 }
 
@@ -102,6 +106,9 @@ public class AlertRuleIm : RestIm
     public AlertComparisonOperator ComparisonOperator { get; set; }
     public double? ComparisonValue { get; set; }
     public string CustomMessage { get; set; }
+
+    /// <summary>Cooldown for this rule in minutes. Null inherits the catalog default, 0 disables it.</summary>
+    public int? ThrottleMinutes { get; set; }
     public List<AlertRuleRecipientIm> Recipients { get; set; }
 }
 
@@ -122,6 +129,9 @@ public class AlertRuleUm : RestUm
     public AlertComparisonOperator ComparisonOperator { get; set; }
     public double? ComparisonValue { get; set; }
     public string CustomMessage { get; set; }
+
+    /// <summary>Cooldown for this rule in minutes. Null inherits the catalog default, 0 disables it.</summary>
+    public int? ThrottleMinutes { get; set; }
 
     /// <summary>Replaces the whole recipient list - the screen always sends the full set.</summary>
     public List<AlertRuleRecipientIm> Recipients { get; set; }

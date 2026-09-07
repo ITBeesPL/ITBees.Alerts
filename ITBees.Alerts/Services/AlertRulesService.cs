@@ -148,6 +148,7 @@ public class AlertRulesService : IAlertRulesService
             ComparisonOperator = alertRuleIm.ComparisonOperator,
             ComparisonValue = alertRuleIm.ComparisonValue,
             CustomMessage = alertRuleIm.CustomMessage,
+            ThrottleMinutes = NormalizeThrottleMinutes(alertRuleIm.ThrottleMinutes),
             CreatedUtc = now,
             UpdatedUtc = now
         });
@@ -192,6 +193,7 @@ public class AlertRulesService : IAlertRulesService
             x.ComparisonOperator = alertRuleUm.ComparisonOperator;
             x.ComparisonValue = alertRuleUm.ComparisonValue;
             x.CustomMessage = alertRuleUm.CustomMessage;
+            x.ThrottleMinutes = NormalizeThrottleMinutes(alertRuleUm.ThrottleMinutes);
             x.IsPlatformRule = targets.Count == 0;
             x.UpdatedUtc = DateTime.UtcNow;
         }).First();
@@ -250,6 +252,22 @@ public class AlertRulesService : IAlertRulesService
 
     private static string NormalizeDescription(string description) =>
         string.IsNullOrWhiteSpace(description) ? null : description.Trim();
+
+    /// <summary>
+    /// Null keeps the catalog default and 0 disables the cooldown, so both stay as they are.
+    /// A negative value is meaningless - treat it as "inherit" rather than rejecting the whole
+    /// rule over a field the settings screen may not even show yet. The upper bound keeps a
+    /// typo (minutes entered as seconds, say) from silencing an alert for years.
+    /// </summary>
+    private static int? NormalizeThrottleMinutes(int? minutes) => minutes switch
+    {
+        null => null,
+        < 0 => null,
+        > MaxThrottleMinutes => MaxThrottleMinutes,
+        _ => minutes
+    };
+
+    private const int MaxThrottleMinutes = 7 * 24 * 60;
 
     private AlertDefinition RequireDefinition(string alertKey, AlertScope scope)
     {

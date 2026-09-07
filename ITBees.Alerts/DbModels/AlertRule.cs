@@ -49,6 +49,13 @@ public class AlertRule
     /// <summary>Operator-authored headline replacing the catalog template. Optional.</summary>
     public string CustomMessage { get; set; }
 
+    /// <summary>
+    /// Cooldown for this subscription, in minutes. Null inherits the catalog default, 0 turns
+    /// the cooldown off. When several rules match one event the shortest window wins, so
+    /// narrowing your own rule never silences somebody else's.
+    /// </summary>
+    public int? ThrottleMinutes { get; set; }
+
     public DateTime CreatedUtc { get; set; }
     public DateTime UpdatedUtc { get; set; }
     public bool Deleted { get; set; }
