@@ -23,6 +23,7 @@ public class AlertDefinitionVm : RestVm
         MetricKey = definition.MetricKey;
         ValueUnit = definition.ValueUnit;
         DefaultMessage = definition.DefaultTitleTemplate;
+        DefaultThrottleMinutes = definition.ThrottleMinutes;
     }
 
     public string Key { get; set; }
@@ -37,4 +38,7 @@ public class AlertDefinitionVm : RestVm
     public string ValueUnit { get; set; }
 
     public string DefaultMessage { get; set; }
+
+    /// <summary>Cooldown a rule inherits when it sets none. Null or 0 means repeats are never suppressed.</summary>
+    public int? DefaultThrottleMinutes { get; set; }
 }
