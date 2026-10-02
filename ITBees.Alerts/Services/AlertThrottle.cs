@@ -18,11 +18,16 @@ namespace ITBees.Alerts.Services;
 /// fault on the same device still gets through immediately - only literal repetitions are
 /// suppressed.
 /// </para>
+/// <para>
+/// Each application (discriminator) is throttled on its own: the admin panel and the operator
+/// panel configure their rules independently, so neither window may affect the other.
+/// </para>
 /// </summary>
 internal static class AlertThrottle
 {
     /// <summary>
-    /// Shortest window wins when several rules match one event: a rule tightening its own
+    /// Called with the rules of one application. Shortest window wins when several of them
+    /// match one event: a rule tightening its own
     /// cooldown must never silence somebody else's subscription. 0 (or no rule opting in)
     /// disables the cooldown, which is the default for every alert that sets nothing.
     /// </summary>
@@ -42,10 +47,16 @@ internal static class AlertThrottle
         return effective == int.MaxValue ? 0 : effective;
     }
 
-    public static string BuildKey(AlertDefinition definition, AlertEvent alertEvent, string title, string message)
+    /// <summary>
+    /// <paramref name="discriminator"/> is the application whose rules are being throttled, not
+    /// the event's - an event raised without one reaches the rules of every application, and each
+    /// of them keeps its own window.
+    /// </summary>
+    public static string BuildKey(string discriminator, AlertDefinition definition, AlertEvent alertEvent,
+        string title, string message)
     {
         var canonical = string.Join('\n',
-            alertEvent.Discriminator ?? string.Empty,
+            discriminator ?? string.Empty,
             definition.Key,
             alertEvent.Scope.Kind ?? string.Empty,
             alertEvent.Scope.Id?.ToString() ?? string.Empty,
@@ -60,8 +71,8 @@ internal static class AlertThrottle
     /// True when the caller may record and deliver the alert - either nothing like it was seen
     /// before, or its window has expired. False means the repeat was swallowed and counted.
     /// </summary>
-    public static bool TryEnterWindow(IServiceProvider sp, string key, AlertDefinition definition,
-        AlertEvent alertEvent, int minutes, DateTime now, ILogger logger)
+    public static bool TryEnterWindow(IServiceProvider sp, string key, string discriminator,
+        AlertDefinition definition, int minutes, DateTime now, ILogger logger)
     {
         var window = TimeSpan.FromMinutes(minutes);
         var stateRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertThrottleState>>();
@@ -75,7 +86,7 @@ internal static class AlertThrottle
                 stateWoRepo.InsertData(new AlertThrottleState
                 {
                     ThrottleKey = key,
-                    Discriminator = alertEvent.Discriminator,
+                    Discriminator = discriminator,
                     AlertKey = definition.Key,
                     LastSentUtc = now,
                     SuppressedCount = 0

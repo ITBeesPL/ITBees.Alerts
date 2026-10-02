@@ -15,6 +15,9 @@ namespace ITBees.Alerts.Tests;
 [TestFixture]
 public class AlertThrottleTests
 {
+    private const string Admin = "admin";
+    private const string Operator = "operator";
+
     private static AlertDefinition Definition(int? throttleMinutes = null) => new()
     {
         Key = "cash.mdb.error",
@@ -72,9 +75,9 @@ public class AlertThrottleTests
         var definition = Definition(60);
         var kasa = Guid.NewGuid().ToString();
 
-        var first = AlertThrottle.BuildKey(definition, Event(parking, kasa), "Błąd MDB - Kasa 0",
+        var first = AlertThrottle.BuildKey(Admin, definition, Event(parking, kasa), "Błąd MDB - Kasa 0",
             "MDB bill validator error 0x09 – Validator disabled");
-        var repeat = AlertThrottle.BuildKey(definition, Event(parking, kasa), "Błąd MDB - Kasa 0",
+        var repeat = AlertThrottle.BuildKey(Admin, definition, Event(parking, kasa), "Błąd MDB - Kasa 0",
             "MDB bill validator error 0x09 – Validator disabled");
 
         Assert.That(repeat, Is.EqualTo(first));
@@ -90,18 +93,38 @@ public class AlertThrottleTests
         const string title = "Błąd MDB - Kasa";
         const string disabled = "MDB bill validator error 0x09 – Validator disabled";
 
-        var baseline = AlertThrottle.BuildKey(definition, Event(parking, kasa0), title, disabled);
+        var baseline = AlertThrottle.BuildKey(Admin, definition, Event(parking, kasa0), title, disabled);
 
         Assert.Multiple(() =>
         {
-            Assert.That(AlertThrottle.BuildKey(definition, Event(parking, kasa1), title, disabled),
+            Assert.That(AlertThrottle.BuildKey(Admin, definition, Event(parking, kasa1), title, disabled),
                 Is.Not.EqualTo(baseline), "a jammed cash point must not silence the one next to it");
             Assert.That(
-                AlertThrottle.BuildKey(definition, Event(parking, kasa0), title,
+                AlertThrottle.BuildKey(Admin, definition, Event(parking, kasa0), title,
                     "MDB coin device error 0x07 – Tube jam"),
                 Is.Not.EqualTo(baseline), "a new fault on the same device still has to get through");
-            Assert.That(AlertThrottle.BuildKey(definition, Event(Guid.NewGuid(), kasa0), title, disabled),
+            Assert.That(AlertThrottle.BuildKey(Admin, definition, Event(Guid.NewGuid(), kasa0), title, disabled),
                 Is.Not.EqualTo(baseline), "another parking is another alert");
+        });
+    }
+
+    [Test]
+    public void Each_application_keeps_its_own_window_for_the_same_event()
+    {
+        var definition = Definition();
+        var alertEvent = Event(Guid.NewGuid(), Guid.NewGuid().ToString());
+        const string title = "Brak połączenia z internetem/serwerem - Kasa 3";
+        const string message = "Octopark API: api.octopark.net unreachable";
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(AlertThrottle.BuildKey(Operator, definition, alertEvent, title, message),
+                Is.Not.EqualTo(AlertThrottle.BuildKey(Admin, definition, alertEvent, title, message)),
+                "an event raised without a discriminator reaches both panels, each counting its own repeats");
+            Assert.That(AlertThrottle.ResolveMinutes(new[] { Rule(30) }, definition), Is.EqualTo(30),
+                "the admin window is resolved from admin rules only");
+            Assert.That(AlertThrottle.ResolveMinutes(new[] { Rule(null) }, definition), Is.Zero,
+                "an operator rule left at the default no longer switches the admin window off");
         });
     }
 }

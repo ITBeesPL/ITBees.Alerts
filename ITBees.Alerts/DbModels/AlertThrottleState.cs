@@ -14,7 +14,7 @@ namespace ITBees.Alerts.DbModels;
 public class AlertThrottleState
 {
     /// <summary>
-    /// Hash of alert key + scope + source + rendered content. See AlertThrottle.BuildKey.
+    /// Hash of application + alert key + scope + source + rendered content. See AlertThrottle.BuildKey.
     /// </summary>
     public string ThrottleKey { get; set; }
 

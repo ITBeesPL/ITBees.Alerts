@@ -68,18 +68,17 @@ public class AlertPublisher : IAlertPublisher
             // Cooldown, once the content is known: a repeat inside the window writes neither an
             // occurrence nor a delivery. Suppressing here rather than at delivery time is what
             // keeps a device stuck in a fault loop from filling the history table as well.
-            var throttleMinutes = alertEvent.IgnoreThrottle ? 0 : AlertThrottle.ResolveMinutes(rules, definition);
-            if (throttleMinutes > 0)
-            {
-                var throttleKey = AlertThrottle.BuildKey(definition, alertEvent, title, message);
-                if (!AlertThrottle.TryEnterWindow(sp, throttleKey, definition, alertEvent, throttleMinutes, now,
-                        _logger))
-                {
-                    _logger.LogDebug("Alert {Key} suppressed - identical alert already sent within {Minutes} min",
-                        definition.Key, throttleMinutes);
-                    return Task.CompletedTask;
-                }
-            }
+            // Every application (admin panel, operator panel, ...) keeps its own window, so a
+            // cooldown configured in one of them never silences or unsilences the other.
+            rules = rules
+                .GroupBy(x => x.Discriminator)
+                .Where(applicationRules => alertEvent.IgnoreThrottle ||
+                                           PassesThrottle(sp, applicationRules.Key, applicationRules.ToList(),
+                                               definition, alertEvent, title, message, now))
+                .SelectMany(applicationRules => applicationRules)
+                .ToList();
+            if (rules.Count == 0)
+                return Task.CompletedTask;
 
             var occurrence = sp.GetRequiredService<IWriteOnlyRepository<AlertOccurrence>>()
                 .InsertData(new AlertOccurrence
@@ -107,6 +106,22 @@ public class AlertPublisher : IAlertPublisher
         }
 
         return Task.CompletedTask;
+    }
+
+    private bool PassesThrottle(IServiceProvider sp, string discriminator, List<AlertRule> applicationRules,
+        AlertDefinition definition, AlertEvent alertEvent, string title, string message, DateTime now)
+    {
+        var throttleMinutes = AlertThrottle.ResolveMinutes(applicationRules, definition);
+        if (throttleMinutes <= 0)
+            return true;
+
+        var throttleKey = AlertThrottle.BuildKey(discriminator, definition, alertEvent, title, message);
+        if (AlertThrottle.TryEnterWindow(sp, throttleKey, discriminator, definition, throttleMinutes, now, _logger))
+            return true;
+
+        _logger.LogDebug("Alert {Key} suppressed for {Discriminator} - identical alert already sent within {Minutes} min",
+            definition.Key, discriminator, throttleMinutes);
+        return false;
     }
 
     private static List<AlertRule> MatchRules(IServiceProvider sp, AlertDefinition definition, AlertScope scope,
