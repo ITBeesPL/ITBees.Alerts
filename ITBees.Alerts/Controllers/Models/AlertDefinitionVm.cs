@@ -24,6 +24,7 @@ public class AlertDefinitionVm : RestVm
         ValueUnit = definition.ValueUnit;
         DefaultMessage = definition.DefaultTitleTemplate;
         DefaultThrottleMinutes = definition.ThrottleMinutes;
+        ConfirmationSeconds = definition.ConfirmationSeconds;
     }
 
     public string Key { get; set; }
@@ -41,4 +42,10 @@ public class AlertDefinitionVm : RestVm
 
     /// <summary>Cooldown a rule inherits when it sets none. Null or 0 means repeats are never suppressed.</summary>
     public int? DefaultThrottleMinutes { get; set; }
+
+    /// <summary>
+    /// How long the condition must last before anybody is notified (see AlertDefinition). Shown in
+    /// the settings so nobody wonders why a 10-second drop did not page them.
+    /// </summary>
+    public int? ConfirmationSeconds { get; set; }
 }

@@ -7,6 +7,7 @@ using ITBees.Alerts.Interfaces;
 using ITBees.Alerts.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ITBees.Alerts.Setup;
 
@@ -32,6 +33,10 @@ public class AlertsSetup
     {
         // The catalog is built once from every registered source.
         services.AddSingleton<IAlertCatalog, AlertCatalog>();
+
+        // Anti-spam defaults (burst digest, flapping). A host registers its own instance first
+        // to change them.
+        services.TryAddSingleton(AlertDeliveryOptions.Default);
 
         // Singleton so hosted services and SignalR handlers can inject it; it opens its own
         // scope per call.

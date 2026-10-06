@@ -12,7 +12,9 @@ namespace ITBees.Alerts.Services;
 /// <summary>
 /// Turns metric streams into alerts. Server load, disk usage or device CPU are not events,
 /// therefore every enabled user-defined comparison is evaluated on a schedule. A transition
-/// from false to true raises one alert; the active-condition set is intentionally in memory.
+/// from false to true raises one alert - once it has held for the definition's
+/// <see cref="Catalog.AlertDefinition.ConfirmationSeconds"/>; the active-condition set is
+/// intentionally in memory.
 /// <para>
 /// Only alerts that somebody actually subscribed to are evaluated: the rules drive the loop,
 /// not the catalog.
@@ -27,6 +29,9 @@ public class AlertMetricEvaluator : BackgroundService
     private readonly IAlertPublisher _publisher;
     private readonly ILogger<AlertMetricEvaluator> _logger;
     private readonly HashSet<string> _activeConditions = new();
+
+    /// <summary>When a not-yet-alerted condition started to match - see the sustain check.</summary>
+    private readonly Dictionary<string, DateTime> _conditionFirstSeenUtc = new();
     private readonly HashSet<Guid> _reportedUnreachableRules = new();
 
     public AlertMetricEvaluator(IServiceProvider serviceProvider, IAlertCatalog catalog, IAlertPublisher publisher,
@@ -147,8 +152,19 @@ public class AlertMetricEvaluator : BackgroundService
                         continue;
 
                     matchingConditions.Add(conditionKey);
-                    if (!_activeConditions.Add(conditionKey))
+                    if (_activeConditions.Contains(conditionKey))
                         continue;
+
+                    // Sustain: a single sample over the line (a nightly job, one CPU spike) is not
+                    // an alert. The comparison must hold on every evaluation for the definition's
+                    // confirmation window; any miss in between drops the start time below.
+                    var now = DateTime.UtcNow;
+                    if (!_conditionFirstSeenUtc.TryGetValue(conditionKey, out var firstSeenUtc))
+                        _conditionFirstSeenUtc[conditionKey] = firstSeenUtc = now;
+                    if (now - firstSeenUtc < TimeSpan.FromSeconds(Math.Max(0, definition.ConfirmationSeconds ?? 0)))
+                        continue;
+
+                    _activeConditions.Add(conditionKey);
 
                     // Addressed at the one rule that crossed, and at its own application - otherwise
                     // the publisher would re-match every rule of this alert kind, including those
@@ -157,6 +173,8 @@ public class AlertMetricEvaluator : BackgroundService
                         {
                             Discriminator = rule.Discriminator,
                             RuleGuids = new[] { rule.Guid },
+                            // Already sustained for the whole window above.
+                            SkipConfirmation = true,
                             SourceId = reading.SourceId,
                             SourceName = reading.SourceName
                         }
@@ -170,6 +188,10 @@ public class AlertMetricEvaluator : BackgroundService
 
         _activeConditions.RemoveWhere(x =>
             !matchingConditions.Contains(x) && evaluatedDefinitionKeys.Contains(DefinitionKeyOf(x)));
+        foreach (var pendingKey in _conditionFirstSeenUtc.Keys
+                     .Where(x => !matchingConditions.Contains(x) && evaluatedDefinitionKeys.Contains(DefinitionKeyOf(x)))
+                     .ToList())
+            _conditionFirstSeenUtc.Remove(pendingKey);
     }
 
     /// <summary>The condition key is prefixed with its alert key so the cycle can prune selectively.</summary>

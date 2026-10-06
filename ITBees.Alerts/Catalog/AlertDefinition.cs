@@ -55,6 +55,29 @@ public class AlertDefinition
     /// </summary>
     public int? ThrottleMinutes { get; set; }
 
+    /// <summary>
+    /// How long a condition must last before anybody is told about it. Null or 0 delivers at
+    /// once - right for discrete events (a lost payment, a failed print) that do not "clear".
+    /// <para>
+    /// Event-driven alerts are recorded immediately, but their deliveries wait out this window;
+    /// a producer that sees the condition clear calls <see cref="Interfaces.IAlertPublisher.ResolveAsync"/>
+    /// and the alert is withdrawn as if it never happened - a half-second network blip must not
+    /// page anybody. Threshold (metric) alerts instead require the comparison to hold on every
+    /// evaluation for this long.
+    /// </para>
+    /// </summary>
+    public int? ConfirmationSeconds { get; set; }
+
+    /// <summary>
+    /// Flapping guard for <see cref="ConfirmationSeconds"/>: after this many alerts were withdrawn
+    /// within <see cref="FlappingWindowMinutes"/>, the next one is delivered at once and says the
+    /// condition is unstable - a link that drops for 10 s every few minutes is a real problem even
+    /// though no single drop lasts long enough. Defaults: 3 withdrawals in 30 minutes.
+    /// </summary>
+    public int? FlappingCount { get; set; }
+
+    public int? FlappingWindowMinutes { get; set; }
+
     /// <summary>Fallback text used when a rule has no custom message. Supports <c>{placeholder}</c> from the event values.</summary>
     public string DefaultTitleTemplate { get; set; }
 

@@ -1,4 +1,6 @@
+using System.Text;
 using ITBees.Alerts.Abstractions;
+using ITBees.Alerts.Configuration;
 using ITBees.Alerts.DbModels;
 using ITBees.Alerts.Interfaces;
 using ITBees.Interfaces.Repository;
@@ -130,6 +132,10 @@ public class AlertDeliveryDispatcher : BackgroundService
                     group.Key.AlertContactGuid, result.Error);
         }
 
+        await DispatchBurstDigestsAsync(sp, senders, deliveryRoRepo,
+            pending.Where(x => !digestDeliveryGuids.Contains(x.Guid)).ToList(), digestDeliveryGuids, now,
+            cancellationToken);
+
         foreach (var delivery in pending.Where(x => !digestDeliveryGuids.Contains(x.Guid)))
         {
             if (cancellationToken.IsCancellationRequested)
@@ -158,6 +164,98 @@ public class AlertDeliveryDispatcher : BackgroundService
                 _logger.LogWarning("Alert delivery {Guid} on {Channel} failed: {Error}",
                     delivery.Guid, delivery.Channel, result.Error);
         }
+    }
+
+    /// <summary>
+    /// Sends everything due for one e-mail address or phone number as a single message when more
+    /// than one alert is waiting for it - the publisher holds bursts until the end of
+    /// <see cref="AlertDeliveryOptions.BurstDigestWindow"/> for exactly this. Handled rows are
+    /// added to <paramref name="handledGuids"/> so the per-row loop skips them.
+    /// </summary>
+    private async Task DispatchBurstDigestsAsync(IServiceProvider sp,
+        IReadOnlyDictionary<AlertChannels, IAlertChannelSender> senders,
+        IReadOnlyRepository<AlertDelivery> deliveryRoRepo, List<AlertDelivery> pending, HashSet<Guid> handledGuids,
+        DateTime now, CancellationToken cancellationToken)
+    {
+        var options = sp.GetService<AlertDeliveryOptions>() ?? AlertDeliveryOptions.Default;
+        var groups = pending
+            .Where(x => x.Channel is AlertChannels.Email or AlertChannels.Sms && !x.DeferredByQuietHours)
+            .GroupBy(x => new { x.Channel, x.Discriminator, x.Target })
+            .Select(x => x.Key)
+            .ToList();
+
+        foreach (var group in groups)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+            if (!senders.ContainsKey(group.Channel))
+                continue;
+
+            // The batch above is capped; the digest must still cover everything due for the address.
+            var due = deliveryRoRepo.GetDataQueryable(x =>
+                    x.Status == AlertDeliveryStatus.Pending && x.Channel == group.Channel &&
+                    x.Discriminator == group.Discriminator && x.Target == group.Target &&
+                    !x.DeferredByQuietHours && (x.NotBeforeUtc == null || x.NotBeforeUtc <= now))
+                .AsNoTracking()
+                .Select(x => x.Guid)
+                .ToList();
+            if (due.Count < 2)
+                continue;
+
+            var claimGuid = Guid.NewGuid();
+            var deliveries = await ClaimAsync(deliveryRoRepo, due, claimGuid, cancellationToken);
+            if (deliveries.Count == 0)
+                continue;
+
+            var context = deliveries.Count == 1
+                ? BuildContext(deliveries[0])
+                : group.Channel == AlertChannels.Sms
+                    ? BuildDigestContext(deliveries)
+                    : BuildEmailDigestContext(deliveries, options.DigestMaxEntries);
+            var result = await SendAsync(senders, group.Channel, context, cancellationToken);
+            await CompleteAsync(deliveryRoRepo, claimGuid, result, cancellationToken);
+            foreach (var delivery in deliveries)
+                handledGuids.Add(delivery.Guid);
+
+            if (!result.Success)
+                _logger.LogWarning("Burst digest of {Count} alert(s) on {Channel} failed: {Error}",
+                    deliveries.Count, group.Channel, result.Error);
+        }
+    }
+
+    private static AlertDeliveryContext BuildEmailDigestContext(List<AlertDelivery> deliveries, int maxEntries)
+    {
+        var first = deliveries[0];
+        var sameKind = deliveries.Select(x => x.AlertOccurrence?.AlertKey).Distinct().Count() == 1;
+        var subject = sameKind
+            ? $"{deliveries.Count}× {first.Subject}"
+            : $"{deliveries.Count} alertów, m.in.: {first.Subject}";
+
+        var body = new StringBuilder();
+        body.Append($"Zebrano {deliveries.Count} powiadomień, które pojawiły się w krótkim odstępie czasu - " +
+                    "jedna wiadomość zamiast wielu.\n");
+        foreach (var delivery in deliveries.Take(maxEntries))
+        {
+            body.Append('\n');
+            body.Append($"[{delivery.CreatedUtc:yyyy-MM-dd HH:mm:ss} UTC] {delivery.Subject}\n");
+            if (!string.IsNullOrWhiteSpace(delivery.Body))
+                body.Append(delivery.Body.TrimEnd()).Append('\n');
+        }
+
+        if (deliveries.Count > maxEntries)
+            body.Append($"\n... oraz {deliveries.Count - maxEntries} kolejnych - pełna lista w historii powiadomień.\n");
+
+        return new AlertDeliveryContext
+        {
+            AlertKey = "email.digest",
+            Discriminator = first.Discriminator,
+            Scope = new AlertScope(first.AlertOccurrence?.ScopeKind, first.AlertOccurrence?.ScopeId),
+            Severity = deliveries.Max(x => x.Severity),
+            Target = first.Target,
+            Subject = AlertTemplateRenderer.Shorten(subject, AlertContentLimits.Title),
+            Body = body.ToString().TrimEnd(),
+            Link = null
+        };
     }
 
     /// <summary>
