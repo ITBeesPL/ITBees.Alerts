@@ -177,12 +177,39 @@ public class AlertConfirmationTests
         Assert.That(_occurrences.Items, Has.Count.EqualTo(1));
     }
 
-    private AlertRule AddRule(string key, int? throttleMinutes, AlertChannels channels = AlertChannels.InApp)
+    [Test]
+    public void Resolving_one_discriminator_does_not_withdraw_another_discriminators_alert()
+    {
+        AddRule(ConditionKey, throttleMinutes: 30, discriminator: "admin");
+        AddRule(ConditionKey, throttleMinutes: 30, discriminator: "operator");
+
+        Raise(ConditionKey, discriminator: null);
+        Resolve(ConditionKey, "admin");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(_occurrences.Items, Has.Count.EqualTo(1));
+            Assert.That(_deliveries.Items, Has.Count.EqualTo(1));
+            Assert.That(_deliveries.Items.Single().Discriminator, Is.EqualTo("operator"));
+            Assert.That(_throttle.Items.Select(x => x.Discriminator), Is.EquivalentTo(new[] { "operator" }));
+        });
+
+        Resolve(ConditionKey, "operator");
+        Assert.Multiple(() =>
+        {
+            Assert.That(_occurrences.Items, Is.Empty);
+            Assert.That(_deliveries.Items, Is.Empty);
+            Assert.That(_throttle.Items, Is.Empty);
+        });
+    }
+
+    private AlertRule AddRule(string key, int? throttleMinutes, AlertChannels channels = AlertChannels.InApp,
+        string discriminator = "admin")
     {
         var rule = new AlertRule
         {
             Guid = Guid.NewGuid(),
-            Discriminator = "admin",
+            Discriminator = discriminator,
             ScopeKind = "parking",
             AlertKey = key,
             IsPlatformRule = true,
@@ -208,9 +235,11 @@ public class AlertConfirmationTests
         }
     });
 
-    private void Raise(string key, bool skipConfirmation = false, string message = "gateway unreachable") =>
+    private void Raise(string key, bool skipConfirmation = false, string message = "gateway unreachable",
+        string? discriminator = "admin") =>
         _publisher.RaiseAsync(new AlertEvent(key, AlertScope.For("parking", Parking))
         {
+            Discriminator = discriminator,
             SourceId = "kasa-3",
             SkipConfirmation = skipConfirmation,
             Values = new Dictionary<string, string>
@@ -220,8 +249,9 @@ public class AlertConfirmationTests
             }
         }).GetAwaiter().GetResult();
 
-    private void Resolve(string key) =>
-        _publisher.ResolveAsync(key, AlertScope.For("parking", Parking), "kasa-3").GetAwaiter().GetResult();
+    private void Resolve(string key, string discriminator = "admin") =>
+        _publisher.ResolveAsync(key, AlertScope.For("parking", Parking), "kasa-3", discriminator)
+            .GetAwaiter().GetResult();
 
     private static void AddRepository<T>(IServiceCollection services, InMemoryRepository<T> repository)
     {

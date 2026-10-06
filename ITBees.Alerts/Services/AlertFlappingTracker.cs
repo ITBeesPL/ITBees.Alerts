@@ -14,8 +14,9 @@ internal sealed class AlertFlappingTracker
 {
     private readonly ConcurrentDictionary<string, State> _states = new();
 
-    public static string BuildKey(string alertKey, string scopeKind, Guid? scopeId, string sourceId) =>
-        $"{alertKey}|{scopeKind}|{scopeId}|{sourceId}";
+    public static string BuildKey(string alertKey, string scopeKind, Guid? scopeId, string sourceId,
+        string discriminator) =>
+        $"{discriminator}|{alertKey}|{scopeKind}|{scopeId}|{sourceId}";
 
     public void RecordWithdrawal(string key, DateTime now)
     {

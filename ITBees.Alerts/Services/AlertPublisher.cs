@@ -85,7 +85,7 @@ public class AlertPublisher : IAlertPublisher
                     ? TimeSpan.FromMinutes(definition.FlappingWindowMinutes.Value)
                     : options.DefaultFlappingWindow;
                 var flappingKey = AlertFlappingTracker.BuildKey(definition.Key, alertEvent.Scope.Kind,
-                    alertEvent.Scope.Id, alertEvent.SourceId);
+                    alertEvent.Scope.Id, alertEvent.SourceId, alertEvent.Discriminator);
                 if (_flappingTracker.TryEnterFlapping(flappingKey, definition.FlappingCount ?? options.DefaultFlappingCount,
                         flappingWindow, now, out var withdrawals))
                 {
@@ -144,12 +144,12 @@ public class AlertPublisher : IAlertPublisher
         return Task.CompletedTask;
     }
 
-    public Task ResolveAsync(string key, AlertScope scope, string sourceId,
+    public Task ResolveAsync(string key, AlertScope scope, string sourceId, string discriminator,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(key))
+            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(discriminator))
                 return Task.CompletedTask;
 
             var definition = _catalog.Get(key);
@@ -172,35 +172,49 @@ public class AlertPublisher : IAlertPublisher
             var deliveryRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertDelivery>>();
             var deliveryWoRepo = sp.GetRequiredService<IWriteOnlyRepository<AlertDelivery>>();
 
+            var candidateOccurrenceGuids = deliveryRoRepo.GetDataQueryable(x =>
+                    x.Discriminator == discriminator && x.Status == AlertDeliveryStatus.Pending)
+                .Select(x => x.AlertOccurrenceGuid)
+                .Distinct()
+                .ToList();
             var candidates = occurrenceRoRepo.GetData(x =>
-                    x.AlertKey == key && x.ScopeKind == scopeKind && x.ScopeId == scopeId &&
+                    candidateOccurrenceGuids.Contains(x.Guid) && x.AlertKey == key &&
+                    x.ScopeKind == scopeKind && x.ScopeId == scopeId &&
                     x.SourceId == sourceId && x.CreatedUtc > since)
                 .ToList();
 
             foreach (var occurrence in candidates)
             {
-                if (!IsStillHeld(deliveryRoRepo, occurrence, now))
+                if (!IsStillHeld(deliveryRoRepo, occurrence, discriminator, now))
                     continue;
 
-                // Nobody has been told yet: remove every trace, so the history shows only alerts
-                // that were real, and release the cooldown so the next real one is not swallowed
-                // as a "repeat" of something nobody ever received.
-                deliveryWoRepo.DeleteData(x => x.AlertOccurrenceGuid == occurrence.Guid &&
-                                               x.Status == AlertDeliveryStatus.Pending);
-                if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid) > 0)
+                // Nobody in this application has been told yet: remove only its deliveries and
+                // release only its cooldown. The occurrence may still belong to another
+                // application and is removed below only after its last delivery is gone.
+                var deleted = deliveryWoRepo.DeleteData(x => x.AlertOccurrenceGuid == occurrence.Guid &&
+                                                          x.Discriminator == discriminator &&
+                                                          x.Status == AlertDeliveryStatus.Pending);
+                if (deleted == 0)
+                    continue;
+                if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid &&
+                                                     x.Discriminator == discriminator) > 0)
                     continue;
 
-                occurrenceWoRepo.DeleteData(x => x.Guid == occurrence.Guid);
-                _heldOccurrences.TryRemove(occurrence.Guid, out _);
-                ReleaseThrottle(sp, definition, occurrence);
+                ReleaseThrottle(sp, definition, occurrence, discriminator);
                 _flappingTracker.RecordWithdrawal(AlertFlappingTracker.BuildKey(definition.Key,
-                    occurrence.ScopeKind, occurrence.ScopeId, occurrence.SourceId), now);
+                    occurrence.ScopeKind, occurrence.ScopeId, occurrence.SourceId, discriminator), now);
+
+                if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid) == 0)
+                {
+                    occurrenceWoRepo.DeleteData(x => x.Guid == occurrence.Guid);
+                    _heldOccurrences.TryRemove(occurrence.Guid, out _);
+                }
 
                 _logger.LogInformation(
-                    "Alert {Key} for {Source} withdrawn - the condition cleared after {Seconds:F0}s, inside " +
-                    "its {Window}s confirmation window",
-                    key, occurrence.SourceName ?? occurrence.SourceId, (now - occurrence.CreatedUtc).TotalSeconds,
-                    definition.ConfirmationSeconds);
+                    "Alert {Key} for {Source} withdrawn for {Discriminator} - the condition cleared after " +
+                    "{Seconds:F0}s, inside its {Window}s confirmation window",
+                    key, occurrence.SourceName ?? occurrence.SourceId, discriminator,
+                    (now - occurrence.CreatedUtc).TotalSeconds, definition.ConfirmationSeconds);
             }
         }
         catch (Exception e)
@@ -218,12 +232,13 @@ public class AlertPublisher : IAlertPublisher
     /// straddles a restart is delivered rather than withdrawn - the safe direction.
     /// </summary>
     private bool IsStillHeld(IReadOnlyRepository<AlertDelivery> deliveryRoRepo, AlertOccurrence occurrence,
-        DateTime now)
+        string discriminator, DateTime now)
     {
         if (!_heldOccurrences.TryGetValue(occurrence.Guid, out var holdUntilUtc) || holdUntilUtc <= now)
             return false;
 
         return deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid &&
+                                                x.Discriminator == discriminator &&
                                                 x.Status != AlertDeliveryStatus.Pending) == 0;
     }
 
@@ -231,12 +246,14 @@ public class AlertPublisher : IAlertPublisher
     /// Deletes the cooldown entry the withdrawn raise created. Only that one: the row must have been
     /// written by this very raise (same second) and hash to this occurrence's content.
     /// </summary>
-    private static void ReleaseThrottle(IServiceProvider sp, AlertDefinition definition, AlertOccurrence occurrence)
+    private static void ReleaseThrottle(IServiceProvider sp, AlertDefinition definition, AlertOccurrence occurrence,
+        string discriminator)
     {
         var stateRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertThrottleState>>();
         var from = occurrence.CreatedUtc.AddSeconds(-1);
         var to = occurrence.CreatedUtc.AddSeconds(1);
-        var states = stateRoRepo.GetData(x => x.AlertKey == definition.Key && x.LastSentUtc >= from &&
+        var states = stateRoRepo.GetData(x => x.Discriminator == discriminator &&
+                                              x.AlertKey == definition.Key && x.LastSentUtc >= from &&
                                               x.LastSentUtc <= to)
             .ToList();
         if (states.Count == 0)
