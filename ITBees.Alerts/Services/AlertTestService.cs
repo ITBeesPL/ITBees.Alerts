@@ -50,7 +50,9 @@ public class AlertTestService : IAlertTestService
                 Severity = definition.DefaultSeverity,
                 Discriminator = discriminator,
                 SourceName = "Test",
-                IgnoreThrottle = true
+                IgnoreThrottle = true,
+                // A test send must arrive now, not after the definition's confirmation window.
+                SkipConfirmation = true
             }
             .With("value", "—")
             .With("threshold", "—")
