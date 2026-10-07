@@ -203,6 +203,75 @@ public class AlertConfirmationTests
         });
     }
 
+    [Test]
+    public void A_condition_raised_without_a_discriminator_is_reported_as_unstable_in_every_application()
+    {
+        // The Octopark case: device alerts reach both panels and recoveries are resolved per panel.
+        AddRule(ConditionKey, throttleMinutes: 30, discriminator: "admin");
+        AddRule(ConditionKey, throttleMinutes: 30, discriminator: "operator");
+
+        for (var i = 0; i < 3; i++)
+        {
+            Raise(ConditionKey, discriminator: null);
+            Resolve(ConditionKey, "admin");
+            Resolve(ConditionKey, "operator");
+        }
+
+        Raise(ConditionKey, discriminator: null);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(_occurrences.Items, Has.Count.EqualTo(1));
+            Assert.That(_occurrences.Items.Single().Message, Does.Contain("Stan niestabilny"));
+            Assert.That(_deliveries.Items.Select(x => x.Discriminator), Is.EquivalentTo(new[] { "admin", "operator" }));
+            Assert.That(_deliveries.Items.Select(x => x.NotBeforeUtc), Is.All.Null, "a flapping alert is not held");
+        });
+    }
+
+    [Test]
+    public void Flapping_in_one_application_does_not_skip_the_confirmation_of_another()
+    {
+        AddRule(ConditionKey, throttleMinutes: null, discriminator: "admin");
+        AddRule(ConditionKey, throttleMinutes: null, discriminator: "operator");
+
+        // Only the admin side ever sees the condition clear.
+        for (var i = 0; i < 3; i++)
+        {
+            Raise(ConditionKey, discriminator: null);
+            Resolve(ConditionKey, "admin");
+        }
+
+        Raise(ConditionKey, discriminator: null);
+
+        var latest = _occurrences.Items.OrderBy(x => x.CreatedUtc).Last();
+        var admin = _deliveries.Items.Single(x => x.AlertOccurrenceGuid == latest.Guid && x.Discriminator == "admin");
+        var operatorDelivery = _deliveries.Items.Single(x =>
+            x.AlertOccurrenceGuid == latest.Guid && x.Discriminator == "operator");
+        Assert.Multiple(() =>
+        {
+            Assert.That(admin.NotBeforeUtc, Is.Null);
+            Assert.That(admin.Body, Does.Contain("Stan niestabilny"));
+            Assert.That(operatorDelivery.NotBeforeUtc, Is.Not.Null, "the operator side still waits for confirmation");
+            Assert.That(operatorDelivery.Body, Does.Not.Contain("Stan niestabilny"));
+        });
+    }
+
+    [Test]
+    public void An_application_without_deliveries_keeps_the_occurrence_until_it_resolves_too()
+    {
+        AddRule(ConditionKey, throttleMinutes: null, discriminator: "admin");
+        AddRule(ConditionKey, throttleMinutes: null, channels: AlertChannels.None, discriminator: "operator");
+
+        Raise(ConditionKey, discriminator: null);
+        Resolve(ConditionKey, "admin");
+
+        Assert.That(_occurrences.Items, Has.Count.EqualTo(1), "the operator side still holds it");
+
+        Resolve(ConditionKey, "operator");
+
+        Assert.That(_occurrences.Items, Is.Empty);
+    }
+
     private AlertRule AddRule(string key, int? throttleMinutes, AlertChannels channels = AlertChannels.InApp,
         string discriminator = "admin")
     {

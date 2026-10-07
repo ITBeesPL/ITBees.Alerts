@@ -23,8 +23,9 @@ public class AlertPublisher : IAlertPublisher
     private readonly ILogger<AlertPublisher> _logger;
     private readonly AlertFlappingTracker _flappingTracker = new();
 
-    /// <summary>Occurrences waiting out their confirmation window, with the window's end.</summary>
-    private readonly ConcurrentDictionary<Guid, DateTime> _heldOccurrences = new();
+    /// <summary>Per occurrence and application: deliveries waiting out the confirmation window.</summary>
+    private readonly ConcurrentDictionary<(Guid OccurrenceGuid, string Discriminator), HeldApplication>
+        _heldApplications = new();
 
     public AlertPublisher(IServiceProvider serviceProvider, IAlertCatalog catalog, ILogger<AlertPublisher> logger)
     {
@@ -73,43 +74,21 @@ public class AlertPublisher : IAlertPublisher
             var now = DateTime.UtcNow;
             var options = sp.GetService<AlertDeliveryOptions>() ?? AlertDeliveryOptions.Default;
 
-            // Confirmation window: deliveries wait it out and ResolveAsync withdraws the alert if
-            // the condition clears meanwhile. A condition that keeps clearing and coming back is
-            // reported at once instead - see AlertFlappingTracker.
+            // Confirmation, flapping and cooldown are decided per application (admin panel, operator
+            // panel, ...). An event raised without a discriminator reaches the rules of several of
+            // them, and ResolveAsync withdraws per application - so every one of them must keep its
+            // own state here as well, or the two sides never meet (a flapping key built from the
+            // event's null discriminator never matched a withdrawal recorded for "admin").
             var confirmation = alertEvent.SkipConfirmation
                 ? TimeSpan.Zero
                 : TimeSpan.FromSeconds(Math.Max(0, definition.ConfirmationSeconds ?? 0));
-            if (confirmation > TimeSpan.Zero)
-            {
-                var flappingWindow = definition.FlappingWindowMinutes is > 0
-                    ? TimeSpan.FromMinutes(definition.FlappingWindowMinutes.Value)
-                    : options.DefaultFlappingWindow;
-                var flappingKey = AlertFlappingTracker.BuildKey(definition.Key, alertEvent.Scope.Kind,
-                    alertEvent.Scope.Id, alertEvent.SourceId, alertEvent.Discriminator);
-                if (_flappingTracker.TryEnterFlapping(flappingKey, definition.FlappingCount ?? options.DefaultFlappingCount,
-                        flappingWindow, now, out var withdrawals))
-                {
-                    confirmation = TimeSpan.Zero;
-                    message = AlertTemplateRenderer.Shorten(
-                        $"{message}\nStan niestabilny - krótkich wystąpień w ciągu ostatnich " +
-                        $"{flappingWindow.TotalMinutes:0} min: {withdrawals}. Zgłoszone bez czekania na potwierdzenie.",
-                        AlertContentLimits.Body);
-                }
-            }
-
-            // Cooldown, once the content is known: a repeat inside the window writes neither an
-            // occurrence nor a delivery. Suppressing here rather than at delivery time is what
-            // keeps a device stuck in a fault loop from filling the history table as well.
-            // Every application (admin panel, operator panel, ...) keeps its own window, so a
-            // cooldown configured in one of them never silences or unsilences the other.
-            rules = rules
+            var plans = rules
                 .GroupBy(x => x.Discriminator)
-                .Where(applicationRules => alertEvent.IgnoreThrottle ||
-                                           PassesThrottle(sp, applicationRules.Key, applicationRules.ToList(),
-                                               definition, alertEvent, title, message, now))
-                .SelectMany(applicationRules => applicationRules)
+                .Select(applicationRules => PlanApplication(sp, applicationRules.Key, applicationRules.ToList(),
+                    definition, alertEvent, title, message, confirmation, options, now))
+                .Where(x => x != null)
                 .ToList();
-            if (rules.Count == 0)
+            if (plans.Count == 0)
                 return Task.CompletedTask;
 
             var occurrence = sp.GetRequiredService<IWriteOnlyRepository<AlertOccurrence>>()
@@ -121,7 +100,8 @@ public class AlertPublisher : IAlertPublisher
                     ScopeId = alertEvent.Scope.Id,
                     Severity = severity,
                     Title = title,
-                    Message = message,
+                    // The history shows the "unstable" note when any application reported it so.
+                    Message = plans.FirstOrDefault(x => x.Flapping)?.Message ?? message,
                     SourceId = alertEvent.SourceId,
                     SourceName = alertEvent.SourceName,
                     Link = alertEvent.Link,
@@ -129,12 +109,12 @@ public class AlertPublisher : IAlertPublisher
                     CreatedUtc = now
                 });
 
-            DateTime? holdUntilUtc = confirmation > TimeSpan.Zero ? now + confirmation : null;
-            if (holdUntilUtc != null)
-                _heldOccurrences[occurrence.Guid] = holdUntilUtc.Value;
+            foreach (var plan in plans.Where(x => x.HoldUntilUtc != null))
+                _heldApplications[(occurrence.Guid, plan.Discriminator)] =
+                    new HeldApplication(plan.HoldUntilUtc.Value, plan.ThrottleKey);
 
-            EnqueueDeliveries(sp, rules, occurrence, definition, alertEvent, scopeName, title, message,
-                alertEvent.Link, severity, now, holdUntilUtc, options);
+            EnqueueDeliveries(sp, plans, occurrence, definition, alertEvent, scopeName, title, alertEvent.Link,
+                severity, now, options);
         }
         catch (Exception e)
         {
@@ -157,11 +137,14 @@ public class AlertPublisher : IAlertPublisher
                 return Task.CompletedTask;
 
             var now = DateTime.UtcNow;
-            PruneHeldOccurrences(now);
-            if (_heldOccurrences.IsEmpty)
+            PruneHeldApplications(now);
+            var heldOccurrenceGuids = _heldApplications.Keys
+                .Where(x => x.Discriminator == discriminator)
+                .Select(x => x.OccurrenceGuid)
+                .ToList();
+            if (heldOccurrenceGuids.Count == 0)
                 return Task.CompletedTask;
 
-            var since = now - TimeSpan.FromSeconds(definition.ConfirmationSeconds.Value);
             var scopeKind = scope.Kind;
             var scopeId = scope.Id;
 
@@ -172,43 +155,39 @@ public class AlertPublisher : IAlertPublisher
             var deliveryRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertDelivery>>();
             var deliveryWoRepo = sp.GetRequiredService<IWriteOnlyRepository<AlertDelivery>>();
 
-            var candidateOccurrenceGuids = deliveryRoRepo.GetDataQueryable(x =>
-                    x.Discriminator == discriminator && x.Status == AlertDeliveryStatus.Pending)
-                .Select(x => x.AlertOccurrenceGuid)
-                .Distinct()
-                .ToList();
             var candidates = occurrenceRoRepo.GetData(x =>
-                    candidateOccurrenceGuids.Contains(x.Guid) && x.AlertKey == key &&
-                    x.ScopeKind == scopeKind && x.ScopeId == scopeId &&
-                    x.SourceId == sourceId && x.CreatedUtc > since)
+                    heldOccurrenceGuids.Contains(x.Guid) && x.AlertKey == key &&
+                    x.ScopeKind == scopeKind && x.ScopeId == scopeId && x.SourceId == sourceId)
                 .ToList();
 
             foreach (var occurrence in candidates)
             {
-                if (!IsStillHeld(deliveryRoRepo, occurrence, discriminator, now))
+                // Claiming the entry first makes a concurrent resolve of the same alert a no-op.
+                if (!_heldApplications.TryRemove((occurrence.Guid, discriminator), out var held) ||
+                    held.HoldUntilUtc <= now)
                     continue;
 
                 // Nobody in this application has been told yet: remove only its deliveries and
-                // release only its cooldown. The occurrence may still belong to another
-                // application and is removed below only after its last delivery is gone.
-                var deleted = deliveryWoRepo.DeleteData(x => x.AlertOccurrenceGuid == occurrence.Guid &&
-                                                          x.Discriminator == discriminator &&
-                                                          x.Status == AlertDeliveryStatus.Pending);
-                if (deleted == 0)
-                    continue;
+                // release only its cooldown, so the next real alert is not swallowed as a "repeat"
+                // of something nobody ever received. Held deliveries cannot have been claimed yet
+                // (their NotBeforeUtc is still ahead) - the check is a safety net.
                 if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid &&
-                                                     x.Discriminator == discriminator) > 0)
+                                                     x.Discriminator == discriminator &&
+                                                     x.Status != AlertDeliveryStatus.Pending) > 0)
                     continue;
 
-                ReleaseThrottle(sp, definition, occurrence, discriminator);
+                deliveryWoRepo.DeleteData(x => x.AlertOccurrenceGuid == occurrence.Guid &&
+                                               x.Discriminator == discriminator &&
+                                               x.Status == AlertDeliveryStatus.Pending);
+                ReleaseThrottle(sp, held.ThrottleKey, occurrence);
                 _flappingTracker.RecordWithdrawal(AlertFlappingTracker.BuildKey(definition.Key,
                     occurrence.ScopeKind, occurrence.ScopeId, occurrence.SourceId, discriminator), now);
 
-                if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid) == 0)
-                {
+                // The occurrence is shared by every application the event reached; it goes with
+                // the last one that has nothing left in it.
+                if (deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid) == 0 &&
+                    !_heldApplications.Keys.Any(x => x.OccurrenceGuid == occurrence.Guid))
                     occurrenceWoRepo.DeleteData(x => x.Guid == occurrence.Guid);
-                    _heldOccurrences.TryRemove(occurrence.Guid, out _);
-                }
 
                 _logger.LogInformation(
                     "Alert {Key} for {Source} withdrawn for {Discriminator} - the condition cleared after " +
@@ -226,74 +205,99 @@ public class AlertPublisher : IAlertPublisher
     }
 
     /// <summary>
-    /// True while the occurrence is waiting out its confirmation window and nothing about it has
-    /// left the outbox. Only this process knows which occurrences were held for confirmation (a
-    /// delivery's NotBeforeUtc may also come from quiet hours or a burst digest), so a blip that
-    /// straddles a restart is delivered rather than withdrawn - the safe direction.
+    /// Confirmation, flapping and cooldown for one application. Null when the cooldown swallows the
+    /// event for it. Flapping is decided first: the note it adds is part of the content the
+    /// cooldown compares.
     /// </summary>
-    private bool IsStillHeld(IReadOnlyRepository<AlertDelivery> deliveryRoRepo, AlertOccurrence occurrence,
-        string discriminator, DateTime now)
+    private ApplicationPlan PlanApplication(IServiceProvider sp, string discriminator,
+        List<AlertRule> applicationRules, AlertDefinition definition, AlertEvent alertEvent, string title,
+        string message, TimeSpan confirmation, AlertDeliveryOptions options, DateTime now)
     {
-        if (!_heldOccurrences.TryGetValue(occurrence.Guid, out var holdUntilUtc) || holdUntilUtc <= now)
-            return false;
+        DateTime? holdUntilUtc = null;
+        var flapping = false;
+        if (confirmation > TimeSpan.Zero)
+        {
+            // A condition that keeps clearing and coming back is reported at once instead of
+            // waiting out yet another window - see AlertFlappingTracker.
+            var flappingWindow = definition.FlappingWindowMinutes is > 0
+                ? TimeSpan.FromMinutes(definition.FlappingWindowMinutes.Value)
+                : options.DefaultFlappingWindow;
+            var flappingKey = AlertFlappingTracker.BuildKey(definition.Key, alertEvent.Scope.Kind,
+                alertEvent.Scope.Id, alertEvent.SourceId, discriminator);
+            if (_flappingTracker.TryEnterFlapping(flappingKey,
+                    definition.FlappingCount ?? options.DefaultFlappingCount, flappingWindow, now,
+                    out var withdrawals))
+            {
+                flapping = true;
+                message = AlertTemplateRenderer.Shorten(
+                    $"{message}\nStan niestabilny - krótkich wystąpień w ciągu ostatnich " +
+                    $"{flappingWindow.TotalMinutes:0} min: {withdrawals}. Zgłoszone bez czekania na potwierdzenie.",
+                    AlertContentLimits.Body);
+            }
+            else
+            {
+                holdUntilUtc = now + confirmation;
+            }
+        }
 
-        return deliveryRoRepo.GetDataCount(x => x.AlertOccurrenceGuid == occurrence.Guid &&
-                                                x.Discriminator == discriminator &&
-                                                x.Status != AlertDeliveryStatus.Pending) == 0;
+        // Cooldown, once the content is known: a repeat inside the window writes neither an
+        // occurrence nor a delivery. Suppressing here rather than at delivery time is what keeps a
+        // device stuck in a fault loop from filling the history table as well. Every application
+        // keeps its own window, so a cooldown configured in one of them never silences or
+        // unsilences the other.
+        string throttleKey = null;
+        if (!alertEvent.IgnoreThrottle)
+        {
+            var throttleMinutes = AlertThrottle.ResolveMinutes(applicationRules, definition);
+            if (throttleMinutes > 0)
+            {
+                throttleKey = AlertThrottle.BuildKey(discriminator, definition, alertEvent, title, message);
+                if (!AlertThrottle.TryEnterWindow(sp, throttleKey, discriminator, definition, throttleMinutes, now,
+                        _logger))
+                {
+                    _logger.LogDebug(
+                        "Alert {Key} suppressed for {Discriminator} - identical alert already sent within {Minutes} min",
+                        definition.Key, discriminator, throttleMinutes);
+                    return null;
+                }
+            }
+        }
+
+        return new ApplicationPlan(discriminator, applicationRules, message, holdUntilUtc, throttleKey, flapping);
     }
 
     /// <summary>
-    /// Deletes the cooldown entry the withdrawn raise created. Only that one: the row must have been
-    /// written by this very raise (same second) and hash to this occurrence's content.
+    /// Deletes the cooldown entry a withdrawn raise opened - by the key that raise computed, and only
+    /// while the entry still belongs to it (written in the same second as the occurrence).
     /// </summary>
-    private static void ReleaseThrottle(IServiceProvider sp, AlertDefinition definition, AlertOccurrence occurrence,
-        string discriminator)
+    private static void ReleaseThrottle(IServiceProvider sp, string throttleKey, AlertOccurrence occurrence)
     {
-        var stateRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertThrottleState>>();
-        var from = occurrence.CreatedUtc.AddSeconds(-1);
-        var to = occurrence.CreatedUtc.AddSeconds(1);
-        var states = stateRoRepo.GetData(x => x.Discriminator == discriminator &&
-                                              x.AlertKey == definition.Key && x.LastSentUtc >= from &&
-                                              x.LastSentUtc <= to)
-            .ToList();
-        if (states.Count == 0)
+        if (throttleKey == null)
             return;
 
-        var stateWoRepo = sp.GetRequiredService<IWriteOnlyRepository<AlertThrottleState>>();
-        var probe = new AlertEvent(definition.Key, new AlertScope(occurrence.ScopeKind, occurrence.ScopeId))
-        {
-            SourceId = occurrence.SourceId
-        };
-        foreach (var state in states)
-        {
-            var throttleKey = state.ThrottleKey;
-            if (throttleKey == AlertThrottle.BuildKey(state.Discriminator, definition, probe,
-                    occurrence.Title, occurrence.Message))
-                stateWoRepo.DeleteData(x => x.ThrottleKey == throttleKey);
-        }
+        var from = occurrence.CreatedUtc.AddSeconds(-1);
+        var to = occurrence.CreatedUtc.AddSeconds(1);
+        sp.GetRequiredService<IWriteOnlyRepository<AlertThrottleState>>()
+            .DeleteData(x => x.ThrottleKey == throttleKey && x.LastSentUtc >= from && x.LastSentUtc <= to);
     }
 
-    private void PruneHeldOccurrences(DateTime now)
+    private void PruneHeldApplications(DateTime now)
     {
-        foreach (var held in _heldOccurrences.Where(x => x.Value <= now).ToList())
-            _heldOccurrences.TryRemove(held.Key, out _);
+        foreach (var held in _heldApplications.Where(x => x.Value.HoldUntilUtc <= now).ToList())
+            _heldApplications.TryRemove(held.Key, out _);
     }
 
-    private bool PassesThrottle(IServiceProvider sp, string discriminator, List<AlertRule> applicationRules,
-        AlertDefinition definition, AlertEvent alertEvent, string title, string message, DateTime now)
-    {
-        var throttleMinutes = AlertThrottle.ResolveMinutes(applicationRules, definition);
-        if (throttleMinutes <= 0)
-            return true;
+    /// <summary>What one application gets out of a single raise.</summary>
+    private sealed record ApplicationPlan(string Discriminator, List<AlertRule> Rules, string Message,
+        DateTime? HoldUntilUtc, string ThrottleKey, bool Flapping);
 
-        var throttleKey = AlertThrottle.BuildKey(discriminator, definition, alertEvent, title, message);
-        if (AlertThrottle.TryEnterWindow(sp, throttleKey, discriminator, definition, throttleMinutes, now, _logger))
-            return true;
-
-        _logger.LogDebug("Alert {Key} suppressed for {Discriminator} - identical alert already sent within {Minutes} min",
-            definition.Key, discriminator, throttleMinutes);
-        return false;
-    }
+    /// <summary>
+    /// An application's share of an occurrence that is still waiting out its confirmation window,
+    /// with the cooldown key its raise opened. Only this process knows it - a delivery's NotBeforeUtc
+    /// may also come from quiet hours or a burst digest - so a blip that straddles a restart is
+    /// delivered rather than withdrawn: the safe direction.
+    /// </summary>
+    private sealed record HeldApplication(DateTime HoldUntilUtc, string ThrottleKey);
 
     private static List<AlertRule> MatchRules(IServiceProvider sp, AlertDefinition definition, AlertScope scope,
         AlertSeverity severity, string discriminator, IReadOnlyCollection<Guid> ruleGuids)
@@ -321,26 +325,58 @@ public class AlertPublisher : IAlertPublisher
             .ToList();
     }
 
-    private static void EnqueueDeliveries(IServiceProvider sp, List<AlertRule> rules, AlertOccurrence occurrence,
-        AlertDefinition definition, AlertEvent alertEvent, string scopeName, string title, string message,
-        string link, AlertSeverity severity, DateTime now, DateTime? holdUntilUtc, AlertDeliveryOptions options)
+    private static void EnqueueDeliveries(IServiceProvider sp, List<ApplicationPlan> plans, AlertOccurrence occurrence,
+        AlertDefinition definition, AlertEvent alertEvent, string scopeName, string title, string link,
+        AlertSeverity severity, DateTime now, AlertDeliveryOptions options)
     {
-        var deliveryWoRepo = sp.GetRequiredService<IWriteOnlyRepository<AlertDelivery>>();
+        var deliveries = new List<AlertDelivery>();
+        foreach (var plan in plans)
+            deliveries.AddRange(BuildApplicationDeliveries(sp, plan, occurrence, definition, alertEvent, scopeName,
+                title, link, severity, now));
+
+        var uniqueDeliveries = deliveries
+            .GroupBy(x => new
+            {
+                x.Channel,
+                x.Discriminator,
+                Target = x.Target?.ToLowerInvariant(),
+                ContactGuid = x.Channel == AlertChannels.Sms ? x.AlertContactGuid : null
+            })
+            .Select(x => x.First())
+            .ToList();
+
+        if (uniqueDeliveries.Count == 0)
+            return;
+
+        // A send somebody explicitly asked for (a test) goes out on its own, like it skips the cooldown.
+        if (!alertEvent.IgnoreThrottle)
+            JoinBurstDigests(sp, uniqueDeliveries, now, options.BurstDigestWindow);
+        sp.GetRequiredService<IWriteOnlyRepository<AlertDelivery>>().InsertData(uniqueDeliveries);
+    }
+
+    /// <summary>
+    /// The deliveries of one application, with its own message (an "unstable" note is added only
+    /// where it decided so) and its own confirmation hold.
+    /// </summary>
+    private static List<AlertDelivery> BuildApplicationDeliveries(IServiceProvider sp, ApplicationPlan plan,
+        AlertOccurrence occurrence, AlertDefinition definition, AlertEvent alertEvent, string scopeName,
+        string title, string link, AlertSeverity severity, DateTime now)
+    {
         var recipientRoRepo = sp.GetRequiredService<IReadOnlyRepository<AlertRuleRecipient>>();
         var deliveries = new List<AlertDelivery>();
-        var scopeDescriptor = $"{occurrence.ScopeKind}:{occurrence.ScopeId}";
+        var message = plan.Message;
+        var holdUntilUtc = plan.HoldUntilUtc;
 
-        foreach (var applicationRules in rules
-                     .Where(x => x.Channels.HasFlag(AlertChannels.InApp))
-                     .GroupBy(x => x.Discriminator))
+        var inAppRule = plan.Rules.FirstOrDefault(x => x.Channels.HasFlag(AlertChannels.InApp));
+        if (inAppRule != null)
         {
-            var inAppRule = applicationRules.First();
             var inAppTitle = RenderRuleTitle(inAppRule, definition, alertEvent, scopeName, title);
             deliveries.Add(NewDelivery(occurrence, inAppRule.Guid, null, inAppRule.Discriminator,
-                AlertChannels.InApp, scopeDescriptor, inAppTitle, message, link, severity, now, holdUntilUtc));
+                AlertChannels.InApp, $"{occurrence.ScopeKind}:{occurrence.ScopeId}", inAppTitle, message, link,
+                severity, now, holdUntilUtc));
         }
 
-        foreach (var rule in rules)
+        foreach (var rule in plan.Rules)
         {
             var ruleTitle = RenderRuleTitle(rule, definition, alertEvent, scopeName, title);
             var contactChannels = rule.Channels & ~AlertChannels.InApp;
@@ -372,24 +408,7 @@ public class AlertPublisher : IAlertPublisher
             }
         }
 
-        var uniqueDeliveries = deliveries
-            .GroupBy(x => new
-            {
-                x.Channel,
-                x.Discriminator,
-                Target = x.Target?.ToLowerInvariant(),
-                ContactGuid = x.Channel == AlertChannels.Sms ? x.AlertContactGuid : null
-            })
-            .Select(x => x.First())
-            .ToList();
-
-        if (uniqueDeliveries.Count == 0)
-            return;
-
-        // A send somebody explicitly asked for (a test) goes out on its own, like it skips the cooldown.
-        if (!alertEvent.IgnoreThrottle)
-            JoinBurstDigests(sp, uniqueDeliveries, now, options.BurstDigestWindow);
-        deliveryWoRepo.InsertData(uniqueDeliveries);
+        return deliveries;
     }
 
     /// <summary>
